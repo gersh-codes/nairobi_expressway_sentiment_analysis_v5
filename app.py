@@ -1,8 +1,9 @@
-from flask import Flask, request, jsonify, send_from_directory
+from flask import Flask, request, jsonify, send_from_directory, Response
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
 import os
 import pandas as pd
+import csv
 from pymongo import MongoClient
 
 from utils.scraper import scrape_twitter, scrape_facebook
@@ -85,6 +86,39 @@ def upload_file():
         return jsonify(processed_data)
     else:
         return jsonify({'error': 'Invalid file type'}), 400
+
+@app.route('/export-logs', methods=['GET'])
+def export_logs():
+    logs = list(logs_collection.find())
+    if not logs:
+        return jsonify({'error': 'No logs found'}), 404
+
+    def generate():
+        header = [
+            'text', 'stakeholder',
+            'vader_label', 'vader_compound',
+            'textblob_label', 'textblob_polarity',
+            'bert_label',
+            'swahili_label', 'swahili_score'
+        ]
+        yield ','.join(header) + '\n'
+
+        for log in logs:
+            row = [
+                log.get('text', '').replace('\n', ' ').replace(',', ' '),
+                log.get('stakeholder', ''),
+                log.get('vader', {}).get('label', ''),
+                str(log.get('vader', {}).get('compound', '')),
+                log.get('textblob', {}).get('label', ''),
+                str(log.get('textblob', {}).get('polarity', '')),
+                log.get('bert', {}).get('label', ''),
+                log.get('swahili', {}).get('label', ''),
+                str(log.get('swahili', {}).get('score', ''))
+            ]
+            yield ','.join(row) + '\n'
+
+    return Response(generate(), mimetype='text/csv',
+                    headers={'Content-Disposition': 'attachment; filename=sentiment_logs.csv'})
 
 if __name__ == '__main__':
     app.run(debug=True, port=5000)
