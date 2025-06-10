@@ -1,0 +1,86 @@
+# ─── Python ──────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.sqlite3
+
+# Virtual environments
+venv/
+venv310/
+ENV/
+env/
+*.env
+
+# Python distribution files
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Flask
+instance/
+.webassets-cache
+
+# PyInstaller
+*.manifest
+*.spec
+
+# pytest
+.cache/
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# logs
+*.log
+
+# ─── Node.js ─────────────────────────────
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+dist/
+build/
+
+# dotenv
+.env
+.env.test
+.env.local
+.env.development
+.env.production
+
+# ─── VS Code ─────────────────────────────
+.vscode/
+*.code-workspace
+
+# ─── OS-specific ─────────────────────────
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Icon?
+Desktop.ini
+
+# ─── MongoDB (if dumping/restoring data) ─
+dump/

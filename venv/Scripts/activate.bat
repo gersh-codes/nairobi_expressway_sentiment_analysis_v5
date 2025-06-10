@@ -8,7 +8,7 @@ if defined _OLD_CODEPAGE (
     "%SystemRoot%\System32\chcp.com" 65001 > nul
 )
 
-set VIRTUAL_ENV=C:\Users\HomePC\Desktop\myCodes\nairobi_expressway_sentiment_analysis\venv
+set VIRTUAL_ENV=C:\Users\HomePC\Desktop\myCodes\nairobi_expressway_sentiment_analysis_v2\venv
 
 if not defined PROMPT set PROMPT=$P$G
 
