@@ -1,58 +1,101 @@
-from flask import Flask, request, jsonify
-from utils.scraper import scrape_twitter, scrape_facebook
-from pymongo import MongoClient
-from utils.sentiment import analyze_sentiment  # Use advanced analyzer
-from flask_cors import CORS
+import os
+from flask import Flask, jsonify, request
+from pymongo import MongoClient, errors
+from dotenv import load_dotenv
+import logging
+
+# Load environment variables from .env file (works in development):contentReference[oaicite:10]{index=10}.
+load_dotenv()
+
+# Logging setup: file + console handlers:contentReference[oaicite:11]{index=11}:contentReference[oaicite:12]{index=12}.
+logger = logging.getLogger('sentiment_logger')
+logger.setLevel(logging.DEBUG)
+formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+
+# File handler: debug logs to logs/app.log
+os.makedirs('logs', exist_ok=True)  # ensure logs directory exists
+file_handler = logging.FileHandler('logs/app.log')
+file_handler.setLevel(logging.DEBUG)
+file_handler.setFormatter(formatter)
+logger.addHandler(file_handler)
+
+# Console handler: info+ logs to stdout
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.INFO)
+console_handler.setFormatter(formatter)
+logger.addHandler(console_handler)
+
+logger.info("Starting Flask app with logging enabled")
 
 app = Flask(__name__)
-CORS(app)
 
-client = MongoClient("mongodb://localhost:27017/")
-db = client.sentiment_db
-logs_collection = db.logs
+# Configure Flask environment
+FLASK_ENV = os.getenv('FLASK_ENV', 'production')
+app.config['ENV'] = FLASK_ENV
+logger.info(f"Flask ENV: {FLASK_ENV}")
 
-@app.route('/')
-def home():
-    return "Nairobi Expressway Sentiment API"
+# MongoDB setup using environment variable
+mongo_uri = os.getenv('MONGODB_URI', 'mongodb://localhost:27017/')
+try:
+    mongo_client = MongoClient(mongo_uri, serverSelectionTimeoutMS=5000)
+    mongo_db = mongo_client['sentiment_db']  # database name as required
+    logger.info("Connected to MongoDB")
+except Exception as e:
+    logger.error(f"MongoDB connection failed: {e}", exc_info=True)
+    mongo_client = None
+    mongo_db = None
 
-@app.route('/scrape/x', methods=['POST'])
-def x_scrape():
-    data = request.get_json()
-    query = data.get('query', 'Nairobi Expressway')
-    tweets = scrape_twitter(query)
+from utils.scraper import scrape_x, scrape_facebook  # our scraper module
 
-    results = []
-    for tweet in tweets:
-        sentiment = analyze_sentiment(tweet['content'])
-        sentiment.update({
-            "platform": "x",
-            "text": tweet['content'],
-            "meta": tweet
-        })
-        logs_collection.insert_one(sentiment)
-        results.append(sentiment)
+@app.route('/scrape', methods=['POST'])
+def scrape():
+    """
+    Endpoint to scrape sentiment data from X.com and Facebook.
+    Expects JSON with 'keyword' for X and 'page' for Facebook.
+    """
+    data = request.get_json() or {}
+    keyword = data.get('keyword', '')
+    page = data.get('page', '')
+    if not keyword or not page:
+        msg = "Missing 'keyword' or 'page' parameter"
+        logger.error(msg)
+        return jsonify({"error": msg}), 400
 
-    return jsonify(results)
+    logger.info(f"Scraping X for keyword: {keyword}")
+    try:
+        x_data = scrape_x(keyword)
+    except Exception as e:
+        logger.error(f"X scraping encountered an error: {e}", exc_info=True)
+        x_data = None
 
-@app.route('/scrape/facebook', methods=['POST'])
-def facebook_scrape():
-    data = request.get_json()
-    page = data.get('page', 'NairobiExpressway')
-    posts = scrape_facebook(page)
+    logger.info(f"Scraping Facebook for page: {page}")
+    try:
+        fb_data = scrape_facebook(page)
+    except Exception as e:
+        logger.error(f"Facebook scraping encountered an error: {e}", exc_info=True)
+        fb_data = None
 
-    results = []
-    for post in posts:
-        sentiment = analyze_sentiment(post['text'])
-        sentiment.update({
-            "platform": "facebook",
-            "text": post['text'],
-            "meta": post
-        })
-        logs_collection.insert_one(sentiment)
-        results.append(sentiment)
+    # Combine results
+    result_doc = {
+        "keyword": keyword,
+        "page": page,
+        "x_results": x_data,
+        "facebook_results": fb_data
+    }
 
-    return jsonify(results)
+    # Insert into MongoDB, if connected
+    if mongo_db:
+        try:
+            mongo_db.logs.insert_one(result_doc)
+            logger.info("Inserted scraped data into MongoDB")
+        except errors.PyMongoError as e:
+            logger.error(f"MongoDB insert failed: {e}", exc_info=True)
 
-if __name__ == '__main__':
-    print("Device set to use cpu")
-    app.run(debug=True)
+    return jsonify(result_doc), 200
+
+if __name__ == "__main__":
+    # Only enable debug if explicitly set to development
+    debug_mode = (FLASK_ENV == 'development')
+    logger.info(f"Running Flask app, debug={debug_mode}")
+    app.run(debug=debug_mode)
+    

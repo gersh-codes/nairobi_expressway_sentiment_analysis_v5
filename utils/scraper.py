@@ -1,95 +1,83 @@
 import os
 import time
-import pickle
+import logging
 from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager
+from selenium.common.exceptions import WebDriverException, TimeoutException
+from facebook_scraper import get_posts
 
-def load_cookies(driver, cookies_path="cookies/x_cookies.pkl"):
-    if os.path.exists(cookies_path):
-        with open(cookies_path, "rb") as f:
-            cookies = pickle.load(f)
-        for cookie in cookies:
-            # Selenium requires sameSite to be 'Strict' or 'Lax' if present
-            if 'sameSite' in cookie:
-                cookie['sameSite'] = 'Strict'
+# Use the same logger (or create a new one for the scraper)
+logger = logging.getLogger('sentiment_logger')
+
+def scrape_x(keyword):
+    """
+    Scrape X.com (Twitter) for tweets containing the keyword.
+    Uses Selenium; handles cookies and SSL if provided.
+    """
+    # Example: use Selenium with Chrome WebDriver
+    try:
+        options = webdriver.ChromeOptions()
+        # If SSL_CERT_FILE is set, ensure the driver uses it (if needed)
+        ssl_cert = os.getenv('SSL_CERT_FILE')
+        if ssl_cert:
+            options.add_argument(f"--ssl-client-certificate={ssl_cert}")
+            logger.debug("Using SSL_CERT_FILE for requests")
+
+        # If we have a path to cookies for X, load them (optional)
+        cookies_path = os.getenv('X_COOKIES_PATH')
+        driver = webdriver.Chrome(options=options)
+        if cookies_path and os.path.exists(cookies_path):
             try:
-                driver.add_cookie(cookie)
-            except Exception:
-                # Sometimes cookies fail to load, ignore
-                pass
+                import json
+                cookies = json.load(open(cookies_path))
+                for cookie in cookies:
+                    driver.add_cookie(cookie)
+                logger.debug("Loaded cookies for X.com session")
+            except Exception as e:
+                logger.warning(f"Failed to load cookies: {e}")
 
-def scrape_twitter(query, max_tweets=30, scrolls=5):
-    tweets = []
-    options = Options()
-    options.add_argument("--headless=new")  # Change to --headless if issues
-    options.add_argument("--disable-blink-features=AutomationControlled")
-    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+        driver.get(f"https://x.com/search?q={keyword}")
+        time.sleep(3)  # wait for page to load (adjust as needed)
 
-    driver.get("https://x.com")  # initial load for setting cookies
-    load_cookies(driver)
-    driver.refresh()
-    time.sleep(4)  # Let page settle after loading cookies
+        tweets = []
+        # Example scraping logic: find tweet elements
+        try:
+            elements = driver.find_elements('xpath', "//article")  # sample XPath
+            for elem in elements[:10]:  # limit to first 10 results
+                text = elem.text
+                tweets.append(text)
+        except Exception as e:
+            logger.error(f"Error parsing X.com page: {e}", exc_info=True)
 
-    search_url = f"https://x.com/search?q={query}&src=typed_query&f=live"
-    driver.get(search_url)
-    time.sleep(3)
+        driver.quit()
+        logger.info(f"Scraped {len(tweets)} tweets from X.com")
+        return tweets
 
-    last_height = driver.execute_script("return document.body.scrollHeight")
+    except (WebDriverException, TimeoutException) as e:
+        logger.error(f"Selenium failed for X.com: {e}", exc_info=True)
+        return None
+    except Exception as e:
+        logger.error(f"Unexpected error in scrape_x: {e}", exc_info=True)
+        return None
 
-    while len(tweets) < max_tweets:
-        # Collect tweets on page
-        tweet_articles = driver.find_elements(By.XPATH, '//article[@data-testid="tweet"]')
-        for article in tweet_articles[len(tweets):max_tweets]:
-            try:
-                content_el = article.find_element(By.XPATH, './/div[@data-testid="tweetText"]')
-                content = content_el.text.strip()
-
-                username_el = article.find_element(By.XPATH, './/div[@dir="ltr"]/span')
-                username = username_el.text.strip()
-
-                time_el = article.find_element(By.TAG_NAME, 'time')
-                date = time_el.get_attribute('datetime') if time_el else ''
-
-                tweets.append({
-                    'content': content,
-                    'username': username,
-                    'date': date
-                })
-            except Exception:
-                # Skip if any element missing
-                continue
-
-        if len(tweets) >= max_tweets:
-            break
-
-        # Scroll to load more tweets
-        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-        time.sleep(3)
-        new_height = driver.execute_script("return document.body.scrollHeight")
-        if new_height == last_height:
-            break
-        last_height = new_height
-
-    driver.quit()
-    return tweets[:max_tweets]
-
-def scrape_facebook(page_name, max_posts=20):
-    from facebook_scraper import get_posts
-
-    posts = []
-    # Note: Requires fb_cookies.json in cookies/ to access private pages if needed
-    cookies_path = "cookies/fb_cookies.json"
-    for post in get_posts(page_name, pages=5, cookies=cookies_path):
-        if 'text' in post and post['text']:
+def scrape_facebook(page_name):
+    """
+    Scrape Facebook public posts from a page using facebook_scraper.
+    """
+    try:
+        posts = []
+        # Optionally, use credentials if set
+        email = os.getenv('FACEBOOK_EMAIL')
+        password = os.getenv('FACEBOOK_PASSWORD')
+        kwargs = {"email": email, "password": password} if email and password else {}
+        # Fetch first page of posts
+        for post in get_posts(page_name, pages=1, **kwargs):
             posts.append({
-                'text': post['text'],
-                'time': post['time'].strftime('%Y-%m-%d %H:%M:%S') if post['time'] else '',
-                'likes': post.get('likes', 0),
-                'comments': post.get('comments', 0)
+                "text": post.get('text'),
+                "time": str(post.get('time')),
+                "likes": post.get('likes'),
             })
-        if len(posts) >= max_posts:
-            break
-    return posts
+        logger.info(f"Scraped {len(posts)} posts from Facebook page '{page_name}'")
+        return posts
+    except Exception as e:
+        logger.error(f"facebook_scraper failed: {e}", exc_info=True)
+        return None
