@@ -3,6 +3,8 @@
 import os
 import logging
 from flask import Flask, request, jsonify
+from flask import Response
+from bson.json_util import dumps
 from pymongo import MongoClient, errors
 from dotenv import load_dotenv
 
@@ -81,22 +83,31 @@ def scrape():
     except ValueError as err:
         return jsonify({"error": str(err)}), 400
 
-    # Scrape and analyze X.com
+    # --- Scrape and analyze X.com tweets ---
     logger.info(f"Scraping X.com for keyword: {keyword}")
     x_data = scrape_x(keyword) or []
     x_sentiments = []
-    for text in x_data:
+    for tweet in x_data:
+        # tweet is a dict {'content': ..., 'username': ..., 'date': ...}
+        text = tweet.get('content', '')
+        if not isinstance(text, str):
+            logger.warning(f"Skipping non-string tweet content: {tweet!r}")
+            continue
         sent = analyze_sentiment(text)
-        sent.update(platform="x", text=text)
+        sent.update(platform="x", text=text, meta=tweet)
         x_sentiments.append(sent)
 
-    # Scrape and analyze Facebook
+    # --- Scrape and analyze Facebook posts ---
     logger.info(f"Scraping Facebook page: {page}")
     fb_data = scrape_facebook(page) or []
     fb_sentiments = []
     for post in fb_data:
-        sent = analyze_sentiment(post['text'])
-        sent.update(platform="facebook", text=post['text'], meta=post)
+        text = post.get('text', '')
+        if not isinstance(text, str):
+            logger.warning(f"Skipping non-string Facebook post text: {post!r}")
+            continue
+        sent = analyze_sentiment(text)
+        sent.update(platform="facebook", text=text, meta=post)
         fb_sentiments.append(sent)
 
     # Build document
@@ -110,7 +121,8 @@ def scrape():
     # Save to MongoDB
     _save_to_db(result_doc)
 
-    return jsonify(result_doc), 200
+    # Serialize with bson.json_util.dumps, which handles ObjectId
+    return Response(dumps(result_doc), mimetype='application/json'), 200
 
 # ─── App Runner ───────────────────────────────────────────────────────────────
 if __name__ == "__main__":
