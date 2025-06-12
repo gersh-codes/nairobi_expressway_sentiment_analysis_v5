@@ -3,11 +3,14 @@ import time
 import json
 import pickle
 import logging
+from contextlib import suppress
+
 from selenium import webdriver
 from selenium.common.exceptions import WebDriverException, TimeoutException
 from selenium.webdriver.common.keys import Keys
-from facebook_scraper import get_posts
-from contextlib import suppress
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 
 logger = logging.getLogger('sentiment_logger')
 SCROLL_JS = "return document.body.scrollHeight"
@@ -24,11 +27,13 @@ def _init_driver(headless: bool) -> webdriver.Chrome:
 
 
 def _try_load_cookies(path):
+    # try JSON
     try:
         with open(path, 'r', encoding='utf-8') as f:
             return json.load(f)
     except Exception:
         logger.debug("JSON cookie load failed")
+    # try pickle
     try:
         with open(path, 'rb') as f:
             return pickle.load(f)
@@ -37,57 +42,58 @@ def _try_load_cookies(path):
     return None
 
 
-def _load_x_cookies(driver):
-    path = os.getenv('X_COOKIES_PATH')
+def _load_cookies_for_site(driver, env_key, base_url):
+    path = os.getenv(env_key)
     if not path or not os.path.exists(path):
-        logger.warning("No X.com cookies to load")
+        logger.warning(f"No cookies found for {base_url}")
         return
-    driver.get("https://x.com")
+    driver.get(base_url)
     cookies = _try_load_cookies(path) or []
-    if not cookies:
-        logger.warning("Cookies file empty or unreadable")
-        return
     for c in cookies:
         if 'sameSite' in c:
             c['sameSite'] = 'Strict'
         with suppress(Exception):
             driver.add_cookie(c)
     driver.refresh()
-    logger.debug(f"Loaded {len(cookies)} cookies; sample: {driver.get_cookies()[:3]}")
+    logger.debug(f"Loaded {len(cookies)} cookies for {base_url}")
 
 
 def _parse_tweet(elem):
     try:
-        content = elem.find_element('xpath', ".//div[@data-testid='tweetText']").text.strip()
+        content = elem.find_element(By.XPATH, ".//div[@data-testid='tweetText']").text.strip()
     except WebDriverException:
         return None
-
     tweet = {'content': content}
-    for key, xp in (('username', ".//div[@data-testid='User-Name']//span"),
-                    ('date',      ".//time")):
-        try:
-            el = elem.find_element('xpath', xp) if key == 'username' else elem.find_element('tag name', 'time')
-            tweet[key] = el.text.strip() if key == 'username' else el.get_attribute('datetime')
-        except WebDriverException:
-            tweet[key] = None
+    # username
+    try:
+        tweet['username'] = elem.find_element(
+            By.XPATH, ".//div[@data-testid='User-Name']//span"
+        ).text.strip()
+    except WebDriverException:
+        tweet['username'] = None
+    # date
+    try:
+        tweet['date'] = elem.find_element(By.TAG_NAME, 'time').get_attribute('datetime')
+    except WebDriverException:
+        tweet['date'] = None
     return tweet
 
 
-def _scroll_and_collect(driver, max_results, parse_func):
+def _scroll_and_collect(driver, max_results, parse_func, xpath):
     results = []
     last_height = driver.execute_script(SCROLL_JS)
-    body = driver.find_element('tag name', 'body')
+    body = driver.find_element(By.TAG_NAME, 'body')
     body.send_keys(Keys.END)
     time.sleep(2)
 
     while len(results) < max_results:
-        elems = driver.find_elements('xpath', "//article[@data-testid='tweet']")
-        logger.debug(f"Found {len(elems)} tweet elements")
+        elems = driver.find_elements(By.XPATH, xpath)
+        logger.debug(f"Found {len(elems)} elements")
         for e in elems[len(results):max_results]:
-            t = parse_func(e)
-            if t:
-                results.append(t)
-                logger.debug(f"Parsed tweet: {t['content'][:50]}…")
+            item = parse_func(e)
+            if item:
+                results.append(item)
+                logger.debug(f"Collected item: {item!r}")
             if len(results) >= max_results:
                 break
 
@@ -107,15 +113,15 @@ def scrape_x(keyword: str, max_results: int = 30, headless: bool = False):
     driver = None
     try:
         driver = _init_driver(headless)
-        _load_x_cookies(driver)
+        _load_cookies_for_site(driver, "X_COOKIES_PATH", "https://x.com")
         driver.get(f"https://x.com/search?q={keyword}&src=typed_query&f=live")
         time.sleep(5)
 
-        tweets = _scroll_and_collect(driver, max_results, _parse_tweet)
-        if not tweets:
-            logger.warning(f"No tweets found for '{keyword}'")
-        else:
-            logger.info(f"Collected {len(tweets)} tweets")
+        tweets = _scroll_and_collect(
+            driver, max_results, _parse_tweet,
+            "//article[@data-testid='tweet']"
+        )
+        logger.info(f"Collected {len(tweets)} tweets")
         return tweets
 
     except (WebDriverException, TimeoutException):
@@ -129,58 +135,68 @@ def scrape_x(keyword: str, max_results: int = 30, headless: bool = False):
     return None
 
 
-# ─── Facebook Helpers ─────────────────────────────────────────────────────────
+# ─── Facebook via search UI ────────────────────────────────────────────────────
 
-def _fetch_posts_from_page(page, keyword, max_posts, creds):
-    """Fetch up to max_posts posts (with comments) containing keyword from one page."""
-    collected = []
+def _collect_comments_for_post(driver, post_elem, max_comments):
     try:
-        for post in get_posts(page, pages=5, options={"comments": True}, **creds):
-            text = post.get('text') or ""
-            if keyword.lower() in text.lower():
-                entry = {
-                    'page': page,
-                    'post_text': text,
-                    'post_time': (
-                        post.get('time').strftime('%Y-%m-%d %H:%M:%S')
-                        if post.get('time') else None
-                    ),
-                    'comments': [
-                        c.get('comment_text') for c in post.get('comments_full', [])
-                        if c.get('comment_text')
-                    ]
-                }
-                collected.append(entry)
-                logger.debug(f"Collected post '{text[:50]}…' with {len(entry['comments'])} comments")
-                if len(collected) >= max_posts:
-                    break
+        # scroll into view and click "Comment"
+        btn = post_elem.find_element(By.XPATH, ".//span[contains(text(),'Comment')]")
+        driver.execute_script("arguments[0].scrollIntoView()", btn)
+        btn.click()
+        WebDriverWait(driver, 5).until(
+            EC.presence_of_all_elements_located((By.XPATH, "//div[@aria-label='Comment']"))
+        )
+        boxes = driver.find_elements(By.XPATH,
+            "//div[@aria-label='Comment']//span[@dir='ltr']"
+        )[:max_comments]
+        return [b.text for b in boxes if b.text.strip()]
     except Exception:
-        logger.exception(f"Error fetching from Facebook page '{page}'")
-    return collected
+        logger.debug("Failed to collect comments for one post", exc_info=True)
+        return []
 
 
-def scrape_facebook(keyword: str, max_posts: int = 20):
-    """
-    Scrape a list of known pages for posts containing the keyword,
-    then collect their comments.
-    """
-    logger.info(f"Scraping Facebook for keyword: {keyword}")
-    page_list = os.getenv('FB_PAGE_LIST', "KeNHA,Ma3Route,NTVKenya,NationAfrica").split(',')
-    creds = {}
-    if (email := os.getenv('FACEBOOK_EMAIL')) and (pwd := os.getenv('FACEBOOK_PASSWORD')):
-        creds = {'email': email, 'password': pwd}
-    else:
-        logger.warning("No Facebook credentials; scraping only public posts")
+def scrape_fb_search_comments(
+    keyword: str,
+    max_posts: int = 10,
+    max_comments_per_post: int = 20,
+    headless: bool = False
+):
+    logger.info(f"Searching Facebook for keyword: {keyword}")
+    driver = None
+    try:
+        driver = _init_driver(headless)
+        _load_cookies_for_site(driver, "FB_COOKIES_PATH", "https://www.facebook.com")
+        query = keyword.replace(' ', '%20')
+        driver.get(f"https://www.facebook.com/search/posts/?q={query}")
+        time.sleep(3)
 
-    all_posts = []
-    for page in page_list:
-        posts = _fetch_posts_from_page(page, keyword, max_posts, creds)
-        all_posts.extend(posts)
-        if len(all_posts) >= max_posts:
-            break
+        posts_data = []
+        last_h = driver.execute_script(SCROLL_JS)
+        while len(posts_data) < max_posts:
+            driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+            time.sleep(2)
+            new_h = driver.execute_script(SCROLL_JS)
+            if new_h == last_h:
+                break
+            last_h = new_h
 
-    if not all_posts:
-        logger.warning(f"No Facebook posts/comments found for '{keyword}'")
-    else:
-        logger.info(f"Collected {len(all_posts)} Facebook posts with comments")
-    return all_posts
+            containers = driver.find_elements(
+                By.XPATH, "//div[contains(@data-testid,'post_message')]"
+            )[:max_posts]
+            for ctn in containers:
+                text = ctn.text.split('\n', 1)[0]
+                comments = _collect_comments_for_post(driver, ctn, max_comments_per_post)
+                posts_data.append({"post_text": text, "comments": comments})
+                if len(posts_data) >= max_posts:
+                    break
+
+        logger.info(f"Collected {len(posts_data)} Facebook posts via search")
+        return posts_data
+
+    except Exception:
+        logger.exception("Error in scrape_fb_search_comments")
+    finally:
+        if driver:
+            with suppress(Exception):
+                driver.quit()
+    return None
