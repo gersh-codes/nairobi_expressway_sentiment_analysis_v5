@@ -135,7 +135,7 @@ def _fetch_posts_from_page(page, keyword, max_posts, creds):
     """Fetch up to max_posts posts (with comments) containing keyword from one page."""
     collected = []
     try:
-        for post in get_posts(page, pages=3, options={"comments": True}, **creds):
+        for post in get_posts(page, pages=5, options={"comments": True}, **creds):
             text = post.get('text') or ""
             if keyword.lower() in text.lower():
                 entry = {
