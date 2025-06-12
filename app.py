@@ -1,5 +1,3 @@
-# app.py
-
 import os
 import logging
 from flask import Flask, request, jsonify, Response
@@ -40,10 +38,6 @@ logger.info(f"Connected to MongoDB at {mongo_uri}")
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 def _validate_request(data):
-    """
-    Ensure request JSON contains 'keyword'.
-    Returns keyword or raises ValueError.
-    """
     keyword = data.get('keyword')
     if not keyword:
         msg = "Missing required field: 'keyword'"
@@ -52,16 +46,12 @@ def _validate_request(data):
     return keyword
 
 def _save_to_db(doc):
-    """
-    Insert a document into MongoDB and log result.
-    """
     try:
         logs_collection.insert_one(doc)
         logger.info("Inserted document into MongoDB")
     except errors.PyMongoError as e:
         logger.error(f"Failed to insert into MongoDB: {e}", exc_info=True)
 
-# Import after logger so logs from scraper/sentiment use same config
 from utils.scraper import scrape_x, scrape_facebook
 from utils.sentiment import analyze_sentiment
 
@@ -78,33 +68,37 @@ def scrape():
     except ValueError as err:
         return jsonify({"error": str(err)}), 400
 
-    # --- Scrape and analyze X.com tweets ---
+    # --- X.com tweets ---
     logger.info(f"Scraping X.com for keyword: {keyword}")
     x_data = scrape_x(keyword) or []
     x_sentiments = []
     for tweet in x_data:
         text = tweet.get('content', '')
-        if not isinstance(text, str):
-            logger.warning(f"Skipping non-string tweet content: {tweet!r}")
-            continue
-        sent = analyze_sentiment(text)
-        sent.update(platform="x", text=text, meta=tweet)
-        x_sentiments.append(sent)
+        if isinstance(text, str):
+            sent = analyze_sentiment(text)
+            sent.update(platform="x", text=text, meta=tweet)
+            x_sentiments.append(sent)
+        else:
+            logger.warning(f"Skipping non-string tweet: {tweet!r}")
 
-    # --- Scrape and analyze Facebook public posts ---
-    logger.info(f"Searching Facebook for keyword: {keyword}")
+    # --- Facebook comments ---
+    logger.info(f"Scraping Facebook for keyword: {keyword}")
     fb_data = scrape_facebook(keyword) or []
     fb_sentiments = []
     for post in fb_data:
-        text = post.get('text', '')
-        if not isinstance(text, str):
-            logger.warning(f"Skipping non-string FB post text: {post!r}")
-            continue
-        sent = analyze_sentiment(text)
-        sent.update(platform="facebook", text=text, meta=post)
-        fb_sentiments.append(sent)
+        for comment in post.get('comments', []):
+            if isinstance(comment, str):
+                sent = analyze_sentiment(comment)
+                sent.update(
+                    platform="facebook",
+                    text=comment,
+                    meta={"page": post["page"], "post_text": post["post_text"]}
+                )
+                fb_sentiments.append(sent)
+            else:
+                logger.warning(f"Skipping non-string comment: {comment!r}")
 
-    # Build and save document
+    # Build and save result
     result_doc = {
         "keyword": keyword,
         "x_results": x_sentiments,
@@ -112,10 +106,9 @@ def scrape():
     }
     _save_to_db(result_doc)
 
-    # Return JSON (handles ObjectId)
     return Response(dumps(result_doc), mimetype='application/json'), 200
 
-# ─── App Runner ───────────────────────────────────────────────────────────────
+# ─── Runner ──────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     logger.info(f"Starting Flask app (debug={DEBUG_MODE})")
     app.run(debug=DEBUG_MODE)
