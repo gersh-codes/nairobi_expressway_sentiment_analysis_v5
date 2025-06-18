@@ -83,4 +83,5 @@ Icon?
 Desktop.ini
 
 # ─── MongoDB (if dumping/restoring data) ─
-dump/
+dump/venv/
+venv310/
