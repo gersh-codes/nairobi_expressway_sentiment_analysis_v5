@@ -85,3 +85,5 @@ Desktop.ini
 # ─── MongoDB (if dumping/restoring data) ─
 dump/venv/
 venv310/
+
+utils/lexicons/swahili_lexicon.json
