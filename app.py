@@ -1,15 +1,21 @@
 import os
 import sys
+import datetime
 import logging
 
 from flask import Flask, request, jsonify, Response
 from bson.json_util import dumps
 from pymongo import MongoClient, errors
 from dotenv import load_dotenv
+from apscheduler.schedulers.background import BackgroundScheduler
 
-# ─── Load & UTF-8 console ──────────────────────────────────────────────────────
+from utils.scraper import scrape_x, scrape_fb_search_comments
+from utils.sentiment import analyze_sentiment
+
+# ─── Load & UTF‑8 Setup ───────────────────────────────────────────────────────
 load_dotenv()
 sys.stdout.reconfigure(encoding='utf-8')
+
 logger = logging.getLogger('sentiment_logger')
 logger.setLevel(logging.DEBUG)
 fmt = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
@@ -27,71 +33,129 @@ logger.addHandler(fh)
 
 # ─── Flask & DB ───────────────────────────────────────────────────────────────
 app = Flask(__name__)
-DEBUG_MODE = os.getenv('FLASK_ENV') == 'development'
+DEBUG = os.getenv('FLASK_ENV') == 'development'
+app.config['ENV'] = 'development' if DEBUG else 'production'
+
 mongo_uri = os.getenv('MONGODB_URI', 'mongodb://localhost:27017/')
 client = MongoClient(mongo_uri, serverSelectionTimeoutMS=5000)
 db = client['sentiment_db']
 logs_col = db['logs']
 logger.info(f"Connected to MongoDB at {mongo_uri}")
 
-# ─── Helpers ──────────────────────────────────────────────────────────────────
-def _validate(data):
-    if not (kw := data.get('keyword')):
-        raise ValueError("Missing required field: 'keyword'")
-    return kw
+# ─── Project timeline ─────────────────────────────────────────────────────────
+def _parse_date(env_key):
+    s = os.getenv(env_key, '')
+    try:
+        return datetime.datetime.fromisoformat(s).replace(tzinfo=datetime.timezone.utc)
+    except Exception:
+        return None
 
-def _save(doc):
+PROJECT_START = _parse_date('PROJECT_START_DATE')
+PROJECT_END   = _parse_date('PROJECT_END_DATE')
+
+def _project_phase(ts_iso: str) -> str:
+    if not (PROJECT_START and PROJECT_END):
+        return 'during'
+    try:
+        dt = datetime.datetime.fromisoformat(ts_iso.rstrip('Z')).replace(tzinfo=datetime.timezone.utc)
+    except Exception:
+        return 'during'
+    if dt < PROJECT_START:
+        return 'before'
+    if dt > PROJECT_END:
+        return 'after'
+    return 'during'
+
+# ─── Storage Helper ───────────────────────────────────────────────────────────
+def _save(doc: dict):
     try:
         logs_col.insert_one(doc)
-        logger.info("Saved to MongoDB")
     except errors.PyMongoError:
         logger.exception("DB insert failed")
 
-from utils.scraper import scrape_x, scrape_fb_search_comments
-from utils.sentiment import analyze_sentiment
-
-# ─── Routes ───────────────────────────────────────────────────────────────────
-@app.route('/', methods=['GET'])
-def home():
-    return "Nairobi Expressway Sentiment API", 200
-
-@app.route('/scrape', methods=['POST'])
-def scrape():
-    data = request.get_json(silent=True) or {}
-    try:
-        keyword = _validate(data)
-    except ValueError as e:
-        logger.error(e)
-        return jsonify({"error": str(e)}), 400
+# ─── Scrape + Store Logic ─────────────────────────────────────────────────────
+def _scrape_and_store(keyword: str):
+    # use timezone-aware now rather than utcnow()
+    now_ts = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    logger.info(f"[JOB] scrape '{keyword}' @ {now_ts}")
 
     # X.com
-    x_raw = scrape_x(keyword) or []
-    x_res = []
-    for t in x_raw:
-        txt = t.get('content','')
-        if isinstance(txt, str):
-            s = analyze_sentiment(txt)
-            s.update(platform="x", text=txt, meta=t)
-            x_res.append(s)
+    tweets = scrape_x(keyword, headless=not DEBUG) or []
+    for t in tweets:
+        phase = _project_phase(t.get('date',''))
+        sent = analyze_sentiment(t['content'])
+        sent.update(
+            platform='x',
+            text=t['content'],
+            meta=t,
+            timestamp=now_ts,
+            project_phase=phase,
+            keyword=keyword
+        )
+        _save(sent)
+    logger.info(f"[JOB] saved {len(tweets)} X items")
 
     # Facebook
-    fb_raw = scrape_fb_search_comments(keyword) or []
-    fb_res = []
-    for post in fb_raw:
-        for c in post.get('comments', []):
-            if isinstance(c, str):
-                s = analyze_sentiment(c)
-                s.update(platform="facebook", text=c,
-                         meta={"post_text": post["post_text"]})
-                fb_res.append(s)
+    posts = scrape_fb_search_comments(keyword, headless=not DEBUG) or []
+    saved = 0
+    for p in posts:
+        phase = _project_phase(p.get('post_time',''))
+        for c in p.get('comments', []):
+            sent = analyze_sentiment(c)
+            sent.update(
+                platform='facebook',
+                text=c,
+                meta={'post_text': p['post_text']},
+                timestamp=now_ts,
+                project_phase=phase,
+                keyword=keyword
+            )
+            _save(sent)
+            saved += 1
+    logger.info(f"[JOB] saved {saved} FB comments")
 
-    result = {"keyword": keyword,
-              "x_results": x_res,
-              "facebook_results": fb_res}
-    _save(result)
-    return Response(dumps(result), mimetype='application/json'), 200
+# ─── HTTP Endpoint ───────────────────────────────────────────────────────────
+@app.route('/scrape', methods=['POST'])
+def scrape_endpoint():
+    data = request.get_json(force=True) or {}
 
-# ─── App Runner ───────────────────────────────────────────────────────────────
+    # support either a single "keyword" or list "keywords"
+    kw_single = data.get('keyword')
+    kw_list   = data.get('keywords')
+
+    if kw_list and isinstance(kw_list, list):
+        keywords = [str(k) for k in kw_list if k]
+    elif kw_single:
+        keywords = [str(kw_single)]
+    else:
+        return jsonify(error="Provide 'keyword' or non-empty list 'keywords'"), 400
+
+    # run immediately for each
+    for kw in keywords:
+        _scrape_and_store(kw)
+
+    return jsonify(message=f"Scraped {len(keywords)} keyword(s): {keywords}"), 200
+
+# ─── Scheduler Setup ──────────────────────────────────────────────────────────
+def _scheduled_scrape_all():
+    kws = logs_col.distinct("keyword")
+    logger.info(f"[SCHED] re‑scraping keywords: {kws}")
+    for kw in kws:
+        _scrape_and_store(kw)
+
+scheduler = BackgroundScheduler()
+scheduler.add_job(
+    _scheduled_scrape_all,
+    'cron',
+    hour='6,12,18',
+    minute=0,
+    id='daily_scrape_job',
+    replace_existing=True
+)
+scheduler.start()
+logger.info("Scheduler started for stored keywords @ 06,12,18 UTC")
+
+# ─── Run App ─────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    logger.info(f"Starting Flask (debug={DEBUG_MODE})")
-    app.run(debug=DEBUG_MODE)
+    logger.info(f"Starting Flask (debug={DEBUG})")
+    app.run(debug=DEBUG)

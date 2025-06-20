@@ -21,7 +21,14 @@ def is_swahili(text):
 def swahili_lexicon_score(text):
     words = text.lower().split()
     score = sum(swahili_lexicon.get(w, 0) for w in words)
-    return 'positive' if score > 0 else 'negative' if score < 0 else 'neutral'
+    # extracted nested conditional
+    if score > 0:
+        label = 'positive'
+    elif score < 0:
+        label = 'negative'
+    else:
+        label = 'neutral'
+    return label
 
 def analyze_sentiment(text):
     textblob_polarity = TextBlob(text).sentiment.polarity
