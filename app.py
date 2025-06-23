@@ -12,138 +12,148 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from utils.scraper import scrape_x, scrape_facebook
 from utils.sentiment import analyze_sentiment
 
-# ─── Load environment and ensure UTF-8 output ────────────────────────────────
+# ─── Bootstrap ────────────────────────────────────────────────────────────────
 load_dotenv()
 sys.stdout.reconfigure(encoding='utf-8')
 
-# ─── Logger configuration ────────────────────────────────────────────────────
+# ─── Logger ──────────────────────────────────────────────────────────────────
 logger = logging.getLogger('sentiment_logger')
 logger.setLevel(logging.DEBUG)
 fmt = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
 
-# Console handler
-ch = logging.StreamHandler(sys.stdout)
-ch.setLevel(logging.INFO)
-ch.setFormatter(fmt)
-logger.addHandler(ch)
+sh = logging.StreamHandler(sys.stdout)
+sh.setLevel(logging.INFO)
+sh.setFormatter(fmt)
+logger.addHandler(sh)
 
-# File handler
 os.makedirs('logs', exist_ok=True)
 fh = logging.FileHandler('logs/app.log', encoding='utf-8')
 fh.setLevel(logging.DEBUG)
 fh.setFormatter(fmt)
 logger.addHandler(fh)
 
-# ─── Flask and MongoDB setup ────────────────────────────────────────────────
+# ─── Flask & MongoDB ─────────────────────────────────────────────────────────
 app = Flask(__name__)
 DEBUG = os.getenv('FLASK_ENV') == 'development'
-mongo_uri = os.getenv('MONGODB_URI', 'mongodb://localhost:27017/')
+mongo_uri = os.getenv('MONGODB_URI', 'mongodb://localhost:27017')
 client = MongoClient(mongo_uri, serverSelectionTimeoutMS=5000)
 db = client['sentiment_db']
-collection = db['logs']
+logs = db['logs']
 logger.info(f"Connected to MongoDB at {mongo_uri}")
 
-# ─── Project timeline helpers ───────────────────────────────────────────────
-def _parse_date(var):
-    raw = os.getenv(var, '')
+# ─── Project Dates ────────────────────────────────────────────────────────────
+def _parse_date(envkey: str):
+    """Read ISO date from ENV and return aware datetime, or None."""
+    val = os.getenv(envkey, "")
     try:
-        return datetime.datetime.fromisoformat(raw).replace(
-            tzinfo=datetime.timezone.utc)
+        return datetime.datetime.fromisoformat(val).replace(tzinfo=datetime.timezone.utc)
     except Exception:
         return None
 
-START = _parse_date('PROJECT_START_DATE')
-END   = _parse_date('PROJECT_END_DATE')
+PROJECT_START = _parse_date('PROJECT_START_DATE')
+PROJECT_END   = _parse_date('PROJECT_END_DATE')
 
-def _project_phase(iso_ts: str) -> str:
-    """Return 'before', 'during', or 'after' based on PROJECT_START/END."""
+def _project_phase(ts_iso: str) -> str:
+    """
+    Categorize timestamp into before/during/after project.
+    Falls back to 'during' on parse errors or missing boundaries.
+    """
     try:
-        ts = datetime.datetime.fromisoformat(iso_ts.rstrip('Z')).replace(
-            tzinfo=datetime.timezone.utc)
+        ts = datetime.datetime.fromisoformat(ts_iso.rstrip('Z')).replace(tzinfo=datetime.timezone.utc)
+        if PROJECT_START and ts < PROJECT_START:
+            return 'before'
+        if PROJECT_END and ts > PROJECT_END:
+            return 'after'
     except Exception:
-        return 'during'
-    if START and ts < START:
-        return 'before'
-    if END and ts > END:
-        return 'after'
+        pass
     return 'during'
 
-# ─── Database save helper ───────────────────────────────────────────────────
+# ─── Persistence ──────────────────────────────────────────────────────────────
 def _save(doc: dict):
+    """Attempt to insert into MongoDB, logging on failure."""
     try:
-        collection.insert_one(doc)
+        logs.insert_one(doc)
     except errors.PyMongoError:
-        logger.exception("Failed to save document")
+        logger.exception("DB insert failed")
 
-# ─── Core scrape→analyze→store flow ─────────────────────────────────────────
+# ─── Core Scrape + Store ─────────────────────────────────────────────────────
 def _scrape_and_store(keyword: str):
-    """Scrape X and Facebook, analyze sentiment, store results."""
+    """Run both scrapers for a keyword, timestamp & save each result."""
     now = datetime.datetime.now(datetime.timezone.utc).isoformat()
     logger.info(f"[JOB] scrape '{keyword}' @ {now}")
 
-    # 1) X.com
+    # — X.com —
     tweets = scrape_x(keyword, headless=not DEBUG)
-    for t in tweets:
-        phase = _project_phase(t.get('date', ''))
+    for t in (tweets or []):
         sent = analyze_sentiment(t['content'])
         sent.update(
             platform='x',
             text=t['content'],
             meta=t,
             timestamp=now,
-            project_phase=phase,
+            project_phase=_project_phase(t.get('date', '')),
             keyword=keyword
         )
         _save(sent)
-    logger.info(f"[JOB] saved {len(tweets)} X items")
+    logger.info(f"[JOB] saved {(len(tweets) if tweets else 0)} X items")
 
-    # 2) Facebook
-    posts = scrape_facebook(keyword, max_posts=20)
-    saved = 0
-    for p in posts:
-        phase = _project_phase(p.get('time', ''))
-        for comment in p.get('comments', []):
-            sent = analyze_sentiment(comment)
+    # — Facebook —
+    posts = scrape_facebook(keyword, max_posts=50)  # increase scope
+    count = 0
+    for p in (posts or []):
+        phase = _project_phase(p.get('time',''))
+        for c in p.get('comments', []):
+            sent = analyze_sentiment(c)
             sent.update(
                 platform='facebook',
-                text=comment,
+                text=c,
                 meta={'post_text': p['text'], 'page': p['page']},
                 timestamp=now,
                 project_phase=phase,
                 keyword=keyword
             )
             _save(sent)
-            saved += 1
-    logger.info(f"[JOB] saved {saved} FB comments")
+            count += 1
+    logger.info(f"[JOB] saved {count} FB comments")
 
-# ─── HTTP endpoint to trigger an immediate scrape ──────────────────────────
+# ─── HTTP Endpoint ───────────────────────────────────────────────────────────
 @app.route('/scrape', methods=['POST'])
 def scrape_endpoint():
+    """
+    Accepts JSON with either:
+      { "keyword": "foo" }
+    or
+      { "keywords": ["foo","bar"] }
+    """
     data = request.get_json(force=True) or {}
-    # support either "keyword" or list "keywords"
-    kws = data.get('keywords') if isinstance(data.get('keywords'), list) else [data.get('keyword')]
-    kws = [str(k).strip() for k in kws if k]
-    if not kws:
+    single = data.get('keyword')
+    multi  = data.get('keywords')
+    if multi and isinstance(multi, list):
+        kws = [str(k) for k in multi if k]
+    elif single:
+        kws = [str(single)]
+    else:
         return jsonify(error="Provide 'keyword' or non-empty list 'keywords'"), 400
 
     for kw in kws:
         _scrape_and_store(kw)
-    return jsonify(message=f"Scraped {len(kws)} keyword(s): {kws}"), 200
 
-# ─── Scheduler to re-scrape all stored keywords three times daily ───────────
+    return jsonify(message=f"Scraped {len(kws)} keyword(s)"), 200
+
+# ─── Scheduler ────────────────────────────────────────────────────────────────
 def _scheduled():
-    keywords = collection.distinct("keyword")
-    logger.info(f"[SCHED] re-scraping {keywords}")
-    for kw in keywords:
+    """Re-scrape all distinct keywords stored in DB."""
+    kws = logs.distinct("keyword")
+    logger.info(f"[SCHED] re-scraping: {kws}")
+    for kw in kws:
         _scrape_and_store(kw)
 
 sched = BackgroundScheduler()
-sched.add_job(_scheduled, 'cron', hour='6,12,18', minute=0,
-              id='daily_scrape', replace_existing=True)
+sched.add_job(_scheduled, 'cron', hour='6,12,18', minute=0, id='daily', replace_existing=True)
 sched.start()
 logger.info("Scheduler started @ 06,12,18 UTC")
 
-# ─── Application entrypoint ────────────────────────────────────────────────
+# ─── Run ──────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     logger.info(f"Starting Flask (debug={DEBUG})")
     app.run(debug=DEBUG)
