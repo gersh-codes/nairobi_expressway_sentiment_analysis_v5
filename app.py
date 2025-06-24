@@ -18,7 +18,7 @@ logger.setLevel(logging.DEBUG)
 fmt = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
 
 sh = logging.StreamHandler(sys.stdout)
-sh.setLevel(logging.INFO)
+sh.setLevel(logging.DEBUG)
 sh.setFormatter(fmt)
 logger.addHandler(sh)
 
@@ -106,7 +106,12 @@ def _scrape_store(keyword: str):
 @app.route('/scrape', methods=['POST'])
 def scrape_api():
     data = request.get_json(force=True) or {}
+    logger.debug(f"/scrape called with raw JSON: {data!r}")
     kws  = data.get('keywords') or []
+    
+    single = data.get('keyword')
+    multi  = data.get('keywords')
+    logger.debug(f" keyword present: {single!r}, keywords present: {multi!r}")
     if not isinstance(kws, list):
         kws = [data.get('keyword')] if data.get('keyword') else []
     if not kws:

@@ -6,31 +6,31 @@
     "path": "/",
     "sameSite": "Lax",
     "secure": true,
-    "value": "C%7B%22t3%22%3A%5B%5D%2C%22utc3%22%3A1750703047140%2C%22v%22%3A1%7D"
+    "value": "C%7B%22t3%22%3A%5B%5D%2C%22utc3%22%3A1750704860058%2C%22v%22%3A1%7D"
   },
   {
     "domain": ".facebook.com",
-    "expiry": 1758479038,
+    "expiry": 1758480852,
     "httpOnly": true,
     "name": "fr",
     "path": "/",
     "sameSite": "None",
     "secure": true,
-    "value": "00bEa65OL9x5IzLXE.AWd_F_fOkd2ll9DZixA_jpzNl0QlQYfeAXR5ZUAr0xO1VzyYjX0.BoWZt4..AAA.0.0.BoWZvA.AWd-odNpwAKVT1GfSywMTo9amdE"
+    "value": "0XPLw4mHqaAzbn9z3.AWeWKTMXCXVf93IaJyD3OEaWD6yXSpBlfR7MAsukinpna6glheg.BoWaKM..AAA.0.0.BoWaLW.AWeXqM_4CMUirj5WYURL6v90fbc"
   },
   {
     "domain": ".facebook.com",
-    "expiry": 1782239037,
+    "expiry": 1782240851,
     "httpOnly": true,
     "name": "xs",
     "path": "/",
     "sameSite": "None",
     "secure": true,
-    "value": "37%3ASjhEdQouN6xF9w%3A2%3A1750703037%3A-1%3A-1"
+    "value": "22%3AiYDUFX6NnYR_Rg%3A2%3A1750704852%3A-1%3A-1"
   },
   {
     "domain": ".facebook.com",
-    "expiry": 1782239037,
+    "expiry": 1782240851,
     "httpOnly": false,
     "name": "c_user",
     "path": "/",
@@ -40,7 +40,7 @@
   },
   {
     "domain": ".facebook.com",
-    "expiry": 1751307847,
+    "expiry": 1751309659,
     "httpOnly": false,
     "name": "wd",
     "path": "/",
@@ -50,22 +50,22 @@
   },
   {
     "domain": ".facebook.com",
-    "expiry": 1785263037,
+    "expiry": 1785264851,
     "httpOnly": true,
     "name": "sb",
     "path": "/",
     "sameSite": "None",
     "secure": true,
-    "value": "eJtZaKaVIOH59ad_lTEtZQSf"
+    "value": "jKJZaMqbaxPJxQYz7aunT80f"
   },
   {
     "domain": ".facebook.com",
-    "expiry": 1785262966,
+    "expiry": 1785264777,
     "httpOnly": true,
     "name": "datr",
     "path": "/",
     "sameSite": "None",
     "secure": true,
-    "value": "eJtZaHXGWrHTrmarWvDYjZAp"
+    "value": "jKJZaFu69wz3BLnXIvO1FwGo"
   }
 ]
