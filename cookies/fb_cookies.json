@@ -6,31 +6,31 @@
     "path": "/",
     "sameSite": "Lax",
     "secure": true,
-    "value": "C%7B%22t3%22%3A%5B%5D%2C%22utc3%22%3A1750759609468%2C%22v%22%3A1%7D"
+    "value": "C%7B%22t3%22%3A%5B%5D%2C%22utc3%22%3A1750768184983%2C%22v%22%3A1%7D"
   },
   {
     "domain": ".facebook.com",
-    "expiry": 1758535602,
+    "expiry": 1758544180,
     "httpOnly": true,
     "name": "fr",
     "path": "/",
     "sameSite": "None",
     "secure": true,
-    "value": "0Uy4T3omEbrwQxJop.AWc1ruFT7pM5keB06BEr-ohwwFfUJjZGlJpm5a7KzUhINvcufEU.BoWnhL..AAA.0.0.BoWni1.AWfIpFpwZcxz-v25-4rwCy0Gns8"
+    "value": "09lUPtSEjeuAfIfu6.AWfA0TXe_j3htY9VvRGLfw-ySQ5yPKPa8fXkfw2zYJpjnB5MD2A.BoWpn5..AAA.0.0.BoWpo3.AWce_ZxTeiaNZunnYToxJ5XOghM"
   },
   {
     "domain": ".facebook.com",
-    "expiry": 1782295601,
+    "expiry": 1782304179,
     "httpOnly": true,
     "name": "xs",
     "path": "/",
     "sameSite": "None",
     "secure": true,
-    "value": "26%3ABvMGIwIVnuQBIw%3A2%3A1750759599%3A-1%3A-1"
+    "value": "7%3ACySv9X5XWDoqXQ%3A2%3A1750768180%3A-1%3A-1"
   },
   {
     "domain": ".facebook.com",
-    "expiry": 1785319525,
+    "expiry": 1785328145,
     "httpOnly": true,
     "name": "ps_l",
     "path": "/",
@@ -40,17 +40,17 @@
   },
   {
     "domain": ".facebook.com",
-    "expiry": 1785319601,
+    "expiry": 1785328179,
     "httpOnly": true,
     "name": "sb",
     "path": "/",
     "sameSite": "None",
     "secure": true,
-    "value": "S3haaEZ2Cr001lismJYsFCIG"
+    "value": "-ZlaaMXC-xTm-3ARRLHcqOMs"
   },
   {
     "domain": ".facebook.com",
-    "expiry": 1785319525,
+    "expiry": 1785328145,
     "httpOnly": true,
     "name": "ps_n",
     "path": "/",
@@ -60,7 +60,7 @@
   },
   {
     "domain": ".facebook.com",
-    "expiry": 1782295601,
+    "expiry": 1782304179,
     "httpOnly": false,
     "name": "c_user",
     "path": "/",
@@ -70,7 +70,7 @@
   },
   {
     "domain": ".facebook.com",
-    "expiry": 1751364409,
+    "expiry": 1751372984,
     "httpOnly": false,
     "name": "wd",
     "path": "/",
@@ -80,12 +80,12 @@
   },
   {
     "domain": ".facebook.com",
-    "expiry": 1785319499,
+    "expiry": 1785328117,
     "httpOnly": true,
     "name": "datr",
     "path": "/",
     "sameSite": "None",
     "secure": true,
-    "value": "S3haaL6obuof92FrU4CdTaIo"
+    "value": "-ZlaaOmE1guTa-UO0FNIyvhu"
   }
 ]
