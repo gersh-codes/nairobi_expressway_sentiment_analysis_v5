@@ -105,7 +105,7 @@ def _scrape_store(keyword: str):
 # ─── API Endpoint ────────────────────────────────────────────
 @app.route('/scrape', methods=['POST'])
 def scrape_api():
-    data = request.get_json(force=True) or {}
+    data = request.get_json(force=True) or request.values.to_dict() or {}
     logger.debug(f"/scrape called with raw JSON: {data!r}")
     kws  = data.get('keywords') or []
     
