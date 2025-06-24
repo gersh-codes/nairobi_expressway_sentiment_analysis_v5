@@ -4,11 +4,7 @@ import logging
 from contextlib import suppress
 
 from selenium import webdriver
-from selenium.common.exceptions import (
-    TimeoutException,
-    WebDriverException,
-    NoSuchElementException
-)
+from selenium.common.exceptions import TimeoutException, WebDriverException
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
@@ -18,7 +14,6 @@ logger = logging.getLogger('sentiment_logger')
 SCROLL_JS = "return document.body.scrollHeight"
 
 def _init_driver(headless: bool):
-    """Instantiate Chrome WebDriver with standard options."""
     opts = webdriver.ChromeOptions()
     opts.add_argument("--disable-blink-features=AutomationControlled")
     opts.add_argument("window-size=1280,1024")
@@ -31,9 +26,7 @@ def _init_driver(headless: bool):
     return drv
 
 def _safe_get(driver, url, retries=3):
-    """
-    Try to driver.get(url), retry on TimeoutException and click any 'Retry' button.
-    """
+    """Load URL, retry on timeout and try clicking any 'Retry' button."""
     for i in range(retries):
         try:
             driver.get(url)
@@ -48,22 +41,23 @@ def _safe_get(driver, url, retries=3):
     return False
 
 def scrape_x(keyword: str, headless: bool = False):
-    """
-    Scroll through ALL live-search tweets for `keyword`.
-    Returns list of {"content","username","date"}.
-    """
+    """Scrape ALL live-search tweets for keyword."""
     logger.info(f"Scraping X.com for '{keyword}'")
     driver = _init_driver(headless)
-    url = f"https://x.com/search?q={keyword.replace(' ','%20')}&src=typed_query&f=live"
     try:
-        if not _safe_get(driver, url):
+        # first load domain & cookies
+        driver.get("https://x.com")
+        # (optional) _load_cookies(...) here if you have a cookies loader
+        search = f"https://x.com/search?q={keyword.replace(' ','%20')}&f=live"
+        if not _safe_get(driver, search):
             return []
-        # wait for the search input to appear (safer than waiting for tweets)
+
+        # wait for first tweet card
         WebDriverWait(driver, 30).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, "input[data-testid='SearchBox_Search_Input']"))
+            EC.presence_of_element_located((By.XPATH, "//article[@data-testid='tweet']"))
         )
 
-        tweets, last_h = [], driver.execute_script(SCROLL_JS)
+        seen, last_h = [], driver.execute_script(SCROLL_JS)
         while True:
             cards = driver.find_elements(By.XPATH, "//article[@data-testid='tweet']")
             for c in cards:
@@ -74,10 +68,9 @@ def scrape_x(keyword: str, headless: bool = False):
                 except WebDriverException:
                     continue
                 rec = {"content": txt, "username": usr, "date": dt}
-                if rec not in tweets:
-                    tweets.append(rec)
+                if rec not in seen:
+                    seen.append(rec)
                     logger.debug(f"→ tweet: {txt[:50]}…")
-            # scroll down and check for new content
             driver.execute_script("window.scrollTo(0,document.body.scrollHeight);")
             time.sleep(2)
             h = driver.execute_script(SCROLL_JS)
@@ -85,8 +78,8 @@ def scrape_x(keyword: str, headless: bool = False):
                 break
             last_h = h
 
-        logger.info(f"Collected {len(tweets)} tweets")
-        return tweets
+        logger.info(f"Collected {len(seen)} tweets")
+        return seen
 
     except Exception:
         logger.exception("Unexpected error in scrape_x")
@@ -95,19 +88,16 @@ def scrape_x(keyword: str, headless: bool = False):
         driver.quit()
 
 def scrape_facebook(keyword: str, headless: bool = False):
-    """
-    Use Selenium to search Facebook posts for `keyword`.
-    Returns list of {"post_text","post_time"}.
-    """
+    """Scrape ALL Facebook posts for keyword via Selenium search."""
     logger.info(f"Scraping Facebook for '{keyword}'")
     driver = _init_driver(headless)
-    url = f"https://www.facebook.com/search/posts/?q={keyword.replace(' ','%20')}"
     try:
+        url = f"https://www.facebook.com/search/posts/?q={keyword.replace(' ','%20')}"
         if not _safe_get(driver, url):
             return []
-        time.sleep(4)  # let JS render
 
-        # click the "Posts" filter
+        time.sleep(4)
+        # click “Posts” filter
         with suppress(Exception):
             tab = WebDriverWait(driver, 10).until(
                 EC.element_to_be_clickable((By.XPATH, "//span[text()='Posts']"))
@@ -129,17 +119,14 @@ def scrape_facebook(keyword: str, headless: bool = False):
             cards = driver.find_elements(By.XPATH, "//div[contains(@data-testid,'post_message')]")
             for c in cards:
                 try:
-                    text_el = c.find_element(By.XPATH, ".//div[contains(@data-testid,'post_message')]")
-                    text = text_el.text.split('\n',1)[0].strip()
-                    time_el = c.find_element(By.TAG_NAME, 'abbr')
-                    post_time = time_el.get_attribute('data-utime') or time_el.get_attribute('title') or time_el.text
-                except (NoSuchElementException, IndexError):
+                    text = c.text.split('\n',1)[0].strip()
+                    abbr = c.find_element(By.TAG_NAME, 'abbr')
+                    post_time = abbr.get_attribute('data-utime') or abbr.get_attribute('title') or abbr.text
+                except Exception:
                     continue
-                posts.append({
-                    "post_text": text,
-                    "post_time": post_time
-                })
+                posts.append({"post_text": text, "post_time": post_time})
                 logger.debug(f"→ fb post: {text[:50]}…")
+
         logger.info(f"Collected {len(posts)} FB posts")
         return posts
 

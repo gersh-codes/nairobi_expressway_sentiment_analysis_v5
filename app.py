@@ -21,7 +21,7 @@ logger.setLevel(logging.DEBUG)
 fmt = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
 
 ch = logging.StreamHandler(sys.stdout)
-ch.setLevel(logging.DEBUG if os.getenv('FLASK_ENV')=='development' else logging.INFO)
+ch.setLevel(logging.DEBUG if os.getenv('FLASK_ENV') == 'development' else logging.INFO)
 ch.setFormatter(fmt)
 logger.addHandler(ch)
 
@@ -42,7 +42,6 @@ logger.info(f"Connected to MongoDB at {mongo_uri}")
 
 # ─── Project Phase Helpers ───────────────────────────────
 def _parse_date(key: str):
-    """Read YYYY-MM-DD from ENV, return UTC datetime or None."""
     val = os.getenv(key, '')
     try:
         return datetime.datetime.fromisoformat(val).replace(tzinfo=datetime.timezone.utc)
@@ -53,12 +52,12 @@ PROJECT_START = _parse_date('PROJECT_START_DATE')
 PROJECT_END   = _parse_date('PROJECT_END_DATE')
 
 def _project_phase(ts_iso: str) -> str:
-    """Return 'before'/'during'/'after' based on project window."""
+    """Tag as before/during/after project window."""
     try:
         ts = datetime.datetime.fromisoformat(ts_iso.rstrip('Z')).replace(tzinfo=datetime.timezone.utc)
         if PROJECT_START and ts < PROJECT_START:
             return 'before'
-        if PROJECT_END   and ts > PROJECT_END:
+        if PROJECT_END and ts > PROJECT_END:
             return 'after'
     except Exception:
         pass
@@ -66,7 +65,6 @@ def _project_phase(ts_iso: str) -> str:
 
 # ─── Persistence ─────────────────────────────────────────
 def _save(doc: dict):
-    """Insert a doc into MongoDB, log on failure."""
     try:
         logs.insert_one(doc)
     except errors.PyMongoError:
@@ -74,7 +72,6 @@ def _save(doc: dict):
 
 # ─── Core Scrape + Store ─────────────────────────────────
 def _scrape_store(keyword: str):
-    """Run X & Facebook scrapers, analyze & timestamp each item."""
     now = datetime.datetime.now(datetime.timezone.utc).isoformat()
     logger.info(f"[JOB] scrape '{keyword}' @ {now}")
 
@@ -113,12 +110,6 @@ def _scrape_store(keyword: str):
 # ─── HTTP Endpoint ───────────────────────────────────────
 @app.route('/scrape', methods=['POST'])
 def scrape_api():
-    """
-    Accepts:
-      { "keyword": "foo" }
-    or
-      { "keywords": ["foo","bar"] }
-    """
     data = request.get_json(silent=True) or {}
     logger.debug(f"/scrape payload: {data!r}")
 
@@ -138,13 +129,12 @@ def scrape_api():
 # ─── Scheduler ────────────────────────────────────────────
 def _scheduled():
     kws = logs.distinct("keyword")
-    logger.info(f"[SCHED] re-scraping keywords: {kws}")
+    logger.info(f"[SCHED] re-scraping stored keywords: {kws}")
     for kw in kws:
         _scrape_store(kw)
 
 sched = BackgroundScheduler()
-sched.add_job(_scheduled, 'cron', hour='6,12,18', minute=0,
-              id='daily_job', replace_existing=True)
+sched.add_job(_scheduled, 'cron', hour='6,12,18', minute=0, id='daily_scrape_job', replace_existing=True)
 sched.start()
 logger.info("Scheduler started @ 06,12,18 UTC")
 
