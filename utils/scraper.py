@@ -1,13 +1,12 @@
 import os
 import time
+import datetime
 import logging
 from contextlib import suppress
 
 from selenium import webdriver
 from selenium.common.exceptions import (
-    TimeoutException,
-    WebDriverException,
-    NoSuchElementException,
+    TimeoutException, WebDriverException, NoSuchElementException
 )
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
@@ -16,10 +15,11 @@ from selenium.webdriver.support import expected_conditions as EC
 
 logger = logging.getLogger('sentiment_logger')
 
-SCROLL_JS        = "return document.body.scrollHeight"
-RETRY_DIV_XPATH  = "//div[@role='button'][.//span[text()='Retry']]"
-CAPTCHA_IFRAME   = "//iframe[contains(@src,'captcha')]"
-MAX_MANUAL_TRIES = 3
+SCROLL_JS         = "return document.body.scrollHeight"
+RETRY_DIV_XPATH   = "//div[@role='button'][.//span[text()='Retry']]"
+CAPTCHA_IFRAME    = "//iframe[contains(@src,'captcha')]"
+MAX_MANUAL_TRIES  = 3
+WINDOW_DAYS       = 7  # chunk size for historical paging
 
 def _init_driver(headless: bool):
     """Initialize Chrome WebDriver."""
@@ -30,163 +30,190 @@ def _init_driver(headless: bool):
         opts.add_argument("--headless=new")
     if ssl := os.getenv('SSL_CERT_FILE'):
         opts.add_argument(f"--ssl-client-certificate={ssl}")
-    d = webdriver.Chrome(options=opts)
-    d.set_page_load_timeout(60)
-    return d
+    drv = webdriver.Chrome(options=opts)
+    drv.set_page_load_timeout(60)
+    return drv
 
-def _safe_get(driver, url, retries=3):
-    """Load URL, allowing manual Retry clicks if needed."""
-    for i in range(1, retries+1):
+def _safe_get(drv, url):
+    """
+    Load a URL, prompting the user to click RETRY if a timeout and
+    retry‑widget appear.
+    """
+    for attempt in range(3):
         try:
-            driver.get(url)
+            drv.get(url)
             return True
         except TimeoutException:
-            logger.warning("Timeout loading %s (%d/%d)", url, i, retries)
-            if driver.find_elements(By.XPATH, RETRY_DIV_XPATH):
-                logger.info("Please click 'Retry' in the browser…")
-                prev = driver.execute_script(SCROLL_JS)
-                WebDriverWait(driver, 60).until(lambda d, p=prev: d.execute_script(SCROLL_JS) > p)
+            logger.warning("Timeout loading %s (%d/3)", url, attempt+1)
+            if drv.find_elements(By.XPATH, RETRY_DIV_XPATH):
+                logger.info("Please click RETRY in the browser…")
+                prev = drv.execute_script(SCROLL_JS)
+                WebDriverWait(drv, 60).until(
+                    lambda d, p=prev: d.execute_script(SCROLL_JS) > p
+                )
             time.sleep(1)
-    logger.error("Failed to load %s", url)
+    logger.error("Failed to load %s after retries", url)
     return False
 
-def _load_cookies(env_key, driver, domain):
-    """Inject saved cookies for a domain."""
-    path = os.getenv(env_key, "")
-    if not path or not os.path.exists(path):
-        return
-    driver.get(domain)
-    with suppress(Exception):
-        import json, pickle
-        try:
-            ck = json.load(open(path, encoding='utf-8'))
-        except Exception:
-            ck = pickle.load(open(path, 'rb'))
-        for c in ck or []:
-            c.setdefault('sameSite', 'Lax')
-            with suppress(Exception):
-                driver.add_cookie(c)
-    driver.refresh()
-
-def _detect_captcha(driver, context):
-    """Return True if we see a CAPTCHA iframe."""
-    if driver.find_elements(By.XPATH, CAPTCHA_IFRAME):
-        logger.error("%s: CAPTCHA detected, aborting", context)
+def _detect_captcha(drv, ctx):
+    """Abort if a CAPTCHA iframe is present."""
+    if drv.find_elements(By.XPATH, CAPTCHA_IFRAME):
+        logger.error("%s: CAPTCHA detected; aborting", ctx)
         return True
     return False
 
-def _advance_and_check(driver, context, last_h, stable, manual_count):
+def _scroll_collect(drv, collect_fn, ctx):
     """
-    Scroll once and handle:
-      - CAPTCHA (abort)
-      - manual Retry (up to MAX_MANUAL_TRIES)
-      - stability count
-    Returns (new_h, new_stable, new_manual, should_break)
+    Scroll loop that:
+     - calls collect_fn() each pass
+     - stops when height stalls twice
+     - aborts on CAPTCHA
+     - allows up to MAX_MANUAL_TRIES manual RETRY waits
     """
-    # scroll
-    driver.execute_script("window.scrollTo(0,document.body.scrollHeight);")
-    time.sleep(2)
-
-    # captcha?
-    if _detect_captcha(driver, context):
-        return last_h, stable, manual_count, True
-
-    # manual retry?
-    if driver.find_elements(By.XPATH, RETRY_DIV_XPATH):
-        manual_count += 1
-        if manual_count > MAX_MANUAL_TRIES:
-            logger.info("%s: exceeded manual retries", context)
-            return last_h, stable, manual_count, True
-        logger.warning("%s: Retry pill seen (%d/%d); click and wait…",
-                       context, manual_count, MAX_MANUAL_TRIES)
-        prev = driver.execute_script(SCROLL_JS)
-        WebDriverWait(driver, 60).until(lambda d, p=prev: d.execute_script(SCROLL_JS) > p)
-        return driver.execute_script(SCROLL_JS), 0, manual_count, False
-
-    # normal height check
-    new_h = driver.execute_script(SCROLL_JS)
-    logger.debug("%s: scrolled new=%d last=%d", context, new_h, last_h)
-    if new_h == last_h:
-        stable += 1
-        if stable >= 2:
-            logger.info("%s: no new content; stopping", context)
-            return new_h, stable, manual_count, True
-    else:
-        stable = 0
-    return new_h, stable, manual_count, False
-
-def _scroll_until_stable(driver, collect_fn, context):
-    """
-    Drive an indefinite scroll/collect loop until content stops growing
-    (or a captcha/retry terminal condition).
-    """
-    items     = []
-    last_h    = driver.execute_script(SCROLL_JS)
-    stable    = 0
-    manual_ct = 0
-    logger.debug("%s: start height=%d", context, last_h)
+    collected, last_h = [], drv.execute_script(SCROLL_JS)
+    stable = manual = 0
+    logger.debug("%s: start height=%d", ctx, last_h)
 
     while True:
-        # collect new
-        for rec in collect_fn():
-            if rec not in items:
-                items.append(rec)
-        # advance & check
-        last_h, stable, manual_ct, should_break = _advance_and_check(
-            driver, context, last_h, stable, manual_ct
-        )
-        if should_break:
+        # 1) gather new items
+        for item in collect_fn():
+            if item not in collected:
+                collected.append(item)
+
+        # 2) scroll down
+        drv.execute_script("window.scrollTo(0,document.body.scrollHeight);")
+        time.sleep(2)
+
+        # 3) check for CAPTCHA
+        if _detect_captcha(drv, ctx):
             break
 
-    return items
+        # 4) manual RETRY prompt
+        if drv.find_elements(By.XPATH, RETRY_DIV_XPATH):
+            manual += 1
+            if manual > MAX_MANUAL_TRIES:
+                logger.info("%s: manual retry limit reached", ctx)
+                break
+            logger.warning("%s: RETRY seen (%d/%d); click & wait…",
+                           ctx, manual, MAX_MANUAL_TRIES)
+            prev = drv.execute_script(SCROLL_JS)
+            WebDriverWait(drv, 60).until(
+                lambda d, p=prev: d.execute_script(SCROLL_JS) > p
+            )
+            last_h = drv.execute_script(SCROLL_JS)
+            stable = 0
+            continue
+
+        # 5) height stability check
+        new_h = drv.execute_script(SCROLL_JS)
+        logger.debug("%s: scrolled new=%d last=%d", ctx, new_h, last_h)
+        if new_h == last_h:
+            stable += 1
+            if stable >= 2:
+                logger.info("%s: no new content; stopping", ctx)
+                break
+        else:
+            last_h, stable = new_h, 0
+
+    return collected
+
+def _collect_window(drv, keyword, since, until):
+    """
+    Scrape one date window [since, until) for X.com
+    """
+    # build query URL
+    q = f"{keyword} since:{since} until:{until}"
+    url = "https://x.com/search?q=" + q.replace(" ", "%20") + "&f=live"
+    if not _safe_get(drv, url):
+        return []
+
+    # wait for the search box to confirm page load
+    WebDriverWait(drv, 30).until(
+        EC.presence_of_element_located(
+            (By.CSS_SELECTOR, "input[data-testid='SearchBox_Search_Input']")
+        )
+    )
+
+    def collect_tweets():
+        out = []
+        for card in drv.find_elements(By.XPATH, "//article[@data-testid='tweet']"):
+            try:
+                txt = card.find_element(
+                    By.XPATH, ".//div[@data-testid='tweetText']"
+                ).text.strip()
+                usr = card.find_element(
+                    By.XPATH, ".//div[@dir='ltr']/span"
+                ).text.strip()
+                dt  = card.find_element(By.TAG_NAME, "time")\
+                         .get_attribute("datetime")
+                out.append({"content": txt, "username": usr, "date": dt})
+            except WebDriverException:
+                continue
+        return out
+
+    return _scroll_collect(drv, collect_tweets, f"X {since}->{until}")
 
 def scrape_x(keyword: str, headless: bool=False):
-    """Scrape all live-search tweets for `keyword`."""
+    """
+    Scrape all tweets back to 2019 by paging in WINDOW_DAYS chunks.
+    Deduplicates across windows by (user,date,preview).
+    """
     logger.info("Scraping X.com for '%s'", keyword)
-    d = _init_driver(headless)
+    drv = _init_driver(headless)
     try:
-        _load_cookies("X_COOKIES_PATH", d, "https://x.com")
-        url = f"https://x.com/search?q={keyword.replace(' ','%20')}&f=live"
-        if not _safe_get(d, url):
-            return []
-        WebDriverWait(d, 30).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, "input[data-testid='SearchBox_Search_Input']"))
-        )
+        # optional: load saved cookies
+        with suppress(Exception):
+            from utils.scraper import _load_cookies
+            _load_cookies("X_COOKIES_PATH", drv, "https://x.com")
 
-        def collect_tweets():
-            out = []
-            for c in d.find_elements(By.XPATH, "//article[@data-testid='tweet']"):
-                try:
-                    txt = c.find_element(By.XPATH, ".//div[@data-testid='tweetText']").text.strip()
-                    usr = c.find_element(By.XPATH, ".//div[@dir='ltr']/span").text.strip()
-                    dt  = c.find_element(By.TAG_NAME, "time").get_attribute("datetime")
-                    out.append({"content": txt, "username": usr, "date": dt})
-                except WebDriverException:
-                    continue
-            return out
+        start = datetime.date(2019,1,1)
+        end   = datetime.date.today()
+        delta = datetime.timedelta(days=WINDOW_DAYS)
+        all_tweets = []
 
-        tweets = _scroll_until_stable(d, collect_tweets, "X.com")
-        logger.info("Collected %d tweets", len(tweets))
-        return tweets
+        # loop through date windows
+        while start < end:
+            stop = min(start + delta, end)
+            window = _collect_window(drv, keyword, start.isoformat(), stop.isoformat())
+            all_tweets.extend(window)
+            start = stop
+
+        # dedupe
+        unique, seen = [], set()
+        for t in all_tweets:
+            key = (t['username'], t['date'], t['content'][:30])
+            if key not in seen:
+                seen.add(key)
+                unique.append(t)
+
+        logger.info("Collected %d unique tweets", len(unique))
+        return unique
 
     except Exception as e:
         logger.exception("scrape_x error: %s", e)
         return []
     finally:
-        d.quit()
+        drv.quit()
 
 def scrape_facebook(keyword: str, headless: bool=False):
-    """Scrape all Facebook posts for `keyword`."""
+    """
+    Scrape Facebook posts via indefinite scroll over <div role="article"> cards.
+    """
     logger.info("Scraping Facebook for '%s'", keyword)
-    d = _init_driver(headless)
+    drv = _init_driver(headless)
     try:
-        _load_cookies("FB_COOKIES_PATH", d, "https://facebook.com")
-        url = f"https://www.facebook.com/search/posts/?q={keyword.replace(' ','%20')}"
-        if not _safe_get(d, url):
+        with suppress(Exception):
+            from utils.scraper import _load_cookies
+            _load_cookies("FB_COOKIES_PATH", drv, "https://facebook.com")
+
+        url = "https://www.facebook.com/search/posts/?q=" + keyword.replace(" ", "%20")
+        if not _safe_get(drv, url):
             return []
+
         time.sleep(4)
+        # click “Posts” filter if shown
         with suppress(TimeoutException, NoSuchElementException):
-            tab = WebDriverWait(d, 10).until(
+            tab = WebDriverWait(drv, 10).until(
                 EC.element_to_be_clickable((By.XPATH, "//span[text()='Posts']"))
             )
             tab.click()
@@ -194,17 +221,17 @@ def scrape_facebook(keyword: str, headless: bool=False):
 
         def collect_posts():
             out = []
-            for c in d.find_elements(By.XPATH, "//div[contains(@data-testid,'post_message')]"):
+            for art in drv.find_elements(By.XPATH, "//div[@role='article']"):
                 try:
-                    txt = c.text.split('\n',1)[0].strip()
-                    ab  = c.find_element(By.TAG_NAME, 'abbr')
+                    txt = art.find_element(By.XPATH, ".//div[@dir='auto']").text.strip()
+                    ab  = art.find_element(By.TAG_NAME, 'abbr')
                     tm  = ab.get_attribute('data-utime') or ab.get_attribute('title') or ab.text
                     out.append({"post_text": txt, "post_time": tm})
                 except (NoSuchElementException, IndexError):
                     continue
             return out
 
-        posts = _scroll_until_stable(d, collect_posts, "Facebook")
+        posts = _scroll_collect(drv, collect_posts, "Facebook")
         logger.info("Collected %d FB posts", len(posts))
         return posts
 
@@ -212,4 +239,4 @@ def scrape_facebook(keyword: str, headless: bool=False):
         logger.exception("scrape_facebook error: %s", e)
         return []
     finally:
-        d.quit()
+        drv.quit()
