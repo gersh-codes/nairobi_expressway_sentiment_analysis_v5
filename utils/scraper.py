@@ -52,19 +52,23 @@ def _load_cookies(env_key: str, driver, domain: str):
     path = os.getenv(env_key, "")
     if not path or not os.path.exists(path):
         return
+
     driver.get(domain)
+    cookies = []  # ensure cookies is always defined
     with suppress(Exception):
         import json, pickle
         try:
             cookies = json.load(open(path, encoding='utf-8'))
-        except (json.JSONDecodeError, pickle.UnpicklingError):
+        except Exception:
             cookies = pickle.load(open(path, 'rb'))
         for c in cookies or []:
+            # normalize domain for Facebook vs X
             c['domain'] = '.facebook.com' if 'facebook' in domain else '.x.com'
             with suppress(Exception):
                 driver.add_cookie(c)
+
     driver.refresh()
-    logger.debug("Loaded %d cookies from %s", len(cookies or []), env_key)
+    logger.debug("Loaded %d cookies from %s", len(cookies), env_key)
 
 
 def _safe_get(driver, url: str) -> bool:
