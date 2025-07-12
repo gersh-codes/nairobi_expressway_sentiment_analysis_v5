@@ -5,34 +5,25 @@ from urllib.parse import quote_plus
 from contextlib import suppress
 
 from selenium import webdriver
-from selenium.common.exceptions import (
-    TimeoutException, WebDriverException, NoSuchElementException
-)
+from selenium.common.exceptions import TimeoutException, WebDriverException
 from selenium.webdriver.common.by import By
-from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
 logger = logging.getLogger('sentiment_logger')
 
-# JS snippet to get full document height
-SCROLL_JS          = "window.scrollTo(0, document.body.scrollHeight);"
-# How many manual “Retry” clicks to allow
-MAX_MANUAL_RETRIES = 3
-# XPaths for Retry button & CAPTCHA iframe
-RETRY_XPATH        = "//button[contains(.,'Retry')]"
-CAPTCHA_XPATH      = "//iframe[contains(@src,'captcha')]"
-# Domains for cookie injection
-X_DOMAIN           = "https://x.com"
-FB_DOMAIN          = "https://www.facebook.com"
-# CSS/XPath constants
-TWEET_XPATH        = "//article[@data-testid='tweet']"
-X_SEARCH_URL       = "https://x.com/search?q={q}&f=top"
-# Scrolling & timing settings
-VIEWPORT_SCROLL    = "window.scrollBy(0, window.innerHeight);"  # one screen at a time
-MAX_STABLE_PASSES  = 3      # how many passes with no new tweets to stop
-LOAD_WAIT          = 10     # seconds to wait for new tweets after each scroll
-RETRY_TIMEOUTS     = 3      # how many times to retry driver.get
+# Domains & URLs
+X_DOMAIN     = "https://x.com"
+SEARCH_FMT   = X_DOMAIN + "/search?q={q}&f={tab}"  # tab: 'top' or 'live'
+
+# Selectors
+TWEET_XPATH      = "//article[@data-testid='tweet']"
+VIEWPORT_SCROLL  = "window.scrollBy(0, window.innerHeight);"
+
+# Scrolling parameters
+LOAD_WAIT        = 10    # seconds to wait after each scroll
+MAX_STABLE       = 3     # stop after this many passes with no new tweets
+
 
 def _init_driver(headless: bool):
     """Initialize Chrome WebDriver with stealth settings."""
@@ -43,103 +34,109 @@ def _init_driver(headless: bool):
         opts.add_argument("--headless=new")
     if ssl := os.getenv('SSL_CERT_FILE'):
         opts.add_argument(f"--ssl-client-certificate={ssl}")
-
-    driver = webdriver.Chrome(options=opts)
-    driver.set_page_load_timeout(60)
-    # mask webdriver property for anti-bot checks
-    driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
-        "source": "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
+    drv = webdriver.Chrome(options=opts)
+    drv.set_page_load_timeout(60)
+    # mask webdriver for anti-bot
+    drv.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
+        "source": "Object.defineProperty(navigator, 'webdriver',{get:() => undefined});"
     })
-    return driver
+    return drv
+
+
+def _safe_get(driver, url: str) -> bool:
+    """Navigate to URL, retrying once on TimeoutException."""
+    try:
+        driver.get(url)
+        return True
+    except TimeoutException:
+        logger.warning("Timeout loading %s; retrying once", url)
+        try:
+            driver.get(url)
+            return True
+        except TimeoutException:
+            logger.error("Failed to load %s after retry", url)
+            return False
 
 
 def _load_cookies(env_key: str, driver, domain: str):
-    """Load and inject cookies so we stay logged in."""
+    """Inject cookies so we stay logged in on X.com."""
     path = os.getenv(env_key, "")
     if not path or not os.path.exists(path):
         return
     driver.get(domain)
     cookies = []
-    with suppress(Exception):
+    try:
         import json, pickle
+        # prefer JSON, fallback to pickle
+        with open(path, encoding='utf-8') as f:
+            cookies = json.load(f)
+    except Exception:
         try:
-            cookies = json.load(open(path, encoding='utf-8'))
+            with open(path, 'rb') as f:
+                cookies = pickle.load(f)
         except Exception:
-            cookies = pickle.load(open(path, 'rb'))
-        for c in cookies:
-            c['domain'] = '.x.com'
-            with suppress(Exception):
-                driver.add_cookie(c)
+            cookies = []
+    for c in cookies:
+        c['domain'] = '.x.com'
+        with suppress(Exception):
+            driver.add_cookie(c)
     driver.refresh()
     logger.debug("Loaded %d cookies from %s", len(cookies), env_key)
 
 
-def _safe_get(driver, url: str) -> bool:
+def _fetch_all(driver):
     """
-    Navigate to URL, retrying up to RETRY_TIMEOUTS times on TimeoutException.
+    Return list of (text, user, date) tuples for every tweet on page.
     """
-    for i in range(1, RETRY_TIMEOUTS + 1):
+    out = []
+    cards = driver.find_elements(By.XPATH, TWEET_XPATH)
+    for c in cards:
         try:
-            driver.get(url)
-            return True
-        except TimeoutException:
-            logger.warning("Timeout %d/%d loading %s", i, RETRY_TIMEOUTS, url)
-            time.sleep(1)
-    logger.error("Failed to load %s after %d timeouts", url, RETRY_TIMEOUTS)
-    return False
+            txt = c.find_element(By.XPATH, ".//div[@data-testid='tweetText']").text.strip()
+            usr = c.find_element(By.XPATH, ".//div[@dir='ltr']/span").text.strip()
+            dt  = c.find_element(By.TAG_NAME, "time").get_attribute("datetime")
+            out.append((txt, usr, dt))
+        except WebDriverException:
+            continue
+    return out
 
 
-def _scrape_x_live(driver):
+def _scrape_tab(driver):
     """
-    Scroll‑and‑collect for X Top feed:
-      - scroll down by one viewport at a time
-      - wait up to LOAD_WAIT for new tweets
-      - stop after MAX_STABLE_PASSES with no count increase
+    Scroll‑and‑collect tweets from the current X.com tab.
+    Scroll one viewport at a time, pausing LOAD_WAIT for new tweets,
+    stopping after MAX_STABLE passes with no growth.
     """
-    # wait for the first tweet element
-    WebDriverWait(driver, 30).until(EC.presence_of_element_located((By.XPATH, TWEET_XPATH)))
-
-    def fetch():
-        """Return list of (text, user, date) tuples for all tweets on page."""
-        out = []
-        for c in driver.find_elements(By.XPATH, TWEET_XPATH):
-            try:
-                txt = c.find_element(By.XPATH, ".//div[@data-testid='tweetText']").text.strip()
-                usr = c.find_element(By.XPATH, ".//div[@dir='ltr']/span").text.strip()
-                dt  = c.find_element(By.TAG_NAME, "time").get_attribute("datetime")
-                out.append((txt, usr, dt))
-            except WebDriverException:
-                continue
-        return out
-
-    collected = []
-    # initial collection
-    for t in fetch():
-        collected.append(t)
-
+    # wait for tweets to appear
+    WebDriverWait(driver, 30).until(
+        EC.presence_of_element_located((By.XPATH, TWEET_XPATH))
+    )
+    collected = _fetch_all(driver)
     stable = 0
-    # continue until we see MAX_STABLE_PASSES in a row with no growth
-    while stable < MAX_STABLE_PASSES:
+
+    while stable < MAX_STABLE:
         prev_count = len(collected)
         # scroll one viewport
         driver.execute_script(VIEWPORT_SCROLL)
-        # wait for new tweets or timeout
+
+        # wait up to LOAD_WAIT for count to increase
         deadline = time.time() + LOAD_WAIT
+        new_list = collected
         while time.time() < deadline:
-            new_list = fetch()
+            new_list = _fetch_all(driver)
             if len(new_list) > prev_count:
                 break
             time.sleep(0.5)
 
-        # merge any new ones
+        # merge new
         for t in new_list:
             if t not in collected:
                 collected.append(t)
 
-        # check stability
+        # track stability
         if len(collected) == prev_count:
             stable += 1
-            logger.debug("No new tweets (pass %d/%d)", stable, MAX_STABLE_PASSES)
+            logger.debug("No new tweets (pass %d/%d)", stable, MAX_STABLE)
         else:
             stable = 0
             logger.debug("Found %d tweets so far", len(collected))
@@ -150,82 +147,37 @@ def _scrape_x_live(driver):
 
 def scrape_x(keyword: str, headless: bool=False):
     """
-    Scrape *all* Top‑tab tweets for `keyword` on X.com.
+    Scrape all tweets from both the Top (f=top) and Latest (f=live) tabs for `keyword`.
+    De‑duplicates across both tabs.
     Returns list of dicts: {'content','username','date'}.
     """
-    logger.info("Scraping X.com for '%s' (Top)", keyword)
+    logger.info("Scraping X.com for '%s' (Top + Live)", keyword)
     driver = _init_driver(headless)
     try:
-        _load_cookies("X_COOKIES_PATH", driver, "https://x.com")
-        url = X_SEARCH_URL.format(q=quote_plus(keyword))
-        if not _safe_get(driver, url):
-            return []
-        tweets = _scrape_x_live(driver)
-        logger.info("Collected %d tweets", len(tweets))
-        return tweets
+        # restore login session
+        _load_cookies("X_COOKIES_PATH", driver, X_DOMAIN)
+
+        all_tweets = []
+        seen = set()
+
+        # iterate over both tabs
+        for tab in ("top", "live"):
+            url = SEARCH_FMT.format(q=quote_plus(keyword), tab=tab)
+            if not _safe_get(driver, url):
+                continue
+            tweets = _scrape_tab(driver)
+            # dedupe across both tabs
+            for t in tweets:
+                key = (t['username'], t['date'], t['content'])
+                if key not in seen:
+                    seen.add(key)
+                    all_tweets.append(t)
+
+        logger.info("Collected %d unique tweets total", len(all_tweets))
+        return all_tweets
+
     except Exception as e:
         logger.exception("scrape_x error: %s", e)
-        return []
-    finally:
-        driver.quit()
-
-
-def _prepare_facebook(driver, keyword: str) -> bool:
-    """
-    Load FB search, then click “Posts” filter via ActionChains + JS scroll.
-    """
-    url = f"{FB_DOMAIN}/search/posts/?q={quote_plus(keyword)}"
-    if not _safe_get(driver, url):
-        return False
-
-    time.sleep(4)
-    with suppress(Exception):
-        tab = WebDriverWait(driver, 10).until(
-            EC.element_to_be_clickable((By.XPATH, "//span[text()='Posts']"))
-        )
-        driver.execute_script("arguments[0].scrollIntoView();", tab)
-        time.sleep(1)
-        ActionChains(driver).move_to_element(tab).click().perform()
-        time.sleep(3)
-    return True
-
-
-def scrape_facebook(keyword: str, headless: bool = False):
-    """
-    Public: scrape all public Facebook posts for `keyword`.
-    Returns list of {post_text, post_time}.
-    """
-    logger.info("Scraping Facebook for '%s'", keyword)
-    driver = _init_driver(headless)
-    try:
-        _load_cookies("FB_COOKIES_PATH", driver, FB_DOMAIN)
-        if not _prepare_facebook(driver, keyword):
-            return []
-
-        def collect_posts():
-            out = []
-            cards = driver.find_elements(By.XPATH, "//div[@role='article']")
-            for card in cards:
-                try:
-                    text = card.find_element(By.CSS_SELECTOR, "div[dir='auto']").text.strip()
-                    abbr = card.find_element(By.TAG_NAME, "abbr")
-                    when = (
-                        abbr.get_attribute("data-utime")
-                        or abbr.get_attribute("title")
-                        or abbr.text
-                        or "unknown"
-                    )
-                    out.append({"post_text": text, "post_time": when})
-                except WebDriverException:
-                    continue
-            return out
-
-        posts = _scroll_collect(driver, collect_posts, "Facebook", max_idle=10)
-        logger.info("Collected %d FB posts", len(posts))
-        return posts
-
-    except Exception as e:
-        logger.exception("scrape_facebook error: %s", e)
         return []
     finally:
         driver.quit()
