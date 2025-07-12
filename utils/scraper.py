@@ -24,14 +24,15 @@ RETRY_XPATH        = "//button[contains(.,'Retry')]"
 CAPTCHA_XPATH      = "//iframe[contains(@src,'captcha')]"
 # Domains for cookie injection
 X_DOMAIN           = "https://x.com"
+FB_DOMAIN          = "https://www.facebook.com"
+# CSS/XPath constants
 TWEET_XPATH        = "//article[@data-testid='tweet']"
 X_SEARCH_URL       = "https://x.com/search?q={q}&f=top"
-FB_DOMAIN          = "https://www.facebook.com"
-# how many passes with no new tweets to stop
-MAX_STABLE         = 3
-# seconds to wait for new tweets after scroll
-LOAD_TIMEOUT       = 10
-
+# Scrolling & timing settings
+VIEWPORT_SCROLL    = "window.scrollBy(0, window.innerHeight);"  # one screen at a time
+MAX_STABLE_PASSES  = 3      # how many passes with no new tweets to stop
+LOAD_WAIT          = 10     # seconds to wait for new tweets after each scroll
+RETRY_TIMEOUTS     = 3      # how many times to retry driver.get
 
 def _init_driver(headless: bool):
     """Initialize Chrome WebDriver with stealth settings."""
@@ -42,17 +43,18 @@ def _init_driver(headless: bool):
         opts.add_argument("--headless=new")
     if ssl := os.getenv('SSL_CERT_FILE'):
         opts.add_argument(f"--ssl-client-certificate={ssl}")
-    drv = webdriver.Chrome(options=opts)
-    drv.set_page_load_timeout(60)
-    # hide webdriver flag for stealth
-    drv.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
+
+    driver = webdriver.Chrome(options=opts)
+    driver.set_page_load_timeout(60)
+    # mask webdriver property for anti-bot checks
+    driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
         "source": "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
     })
-    return drv
+    return driver
 
 
 def _load_cookies(env_key: str, driver, domain: str):
-    """Inject cookies from disk so we’re past the login wall."""
+    """Load and inject cookies so we stay logged in."""
     path = os.getenv(env_key, "")
     if not path or not os.path.exists(path):
         return
@@ -73,81 +75,83 @@ def _load_cookies(env_key: str, driver, domain: str):
 
 
 def _safe_get(driver, url: str) -> bool:
-    """Navigate to URL, with up to 3 manual‑retry prompts on timeout."""
-    for i in range(1, 4):
+    """
+    Navigate to URL, retrying up to RETRY_TIMEOUTS times on TimeoutException.
+    """
+    for i in range(1, RETRY_TIMEOUTS + 1):
         try:
             driver.get(url)
             return True
         except TimeoutException:
-            logger.warning("Timeout %d loading %s", i, url)
+            logger.warning("Timeout %d/%d loading %s", i, RETRY_TIMEOUTS, url)
             time.sleep(1)
-    logger.error("Giving up on %s after timeouts", url)
+    logger.error("Failed to load %s after %d timeouts", url, RETRY_TIMEOUTS)
     return False
 
 
 def _scrape_x_live(driver):
     """
-    Custom scroll loop for X.com Top feed:
-      - scroll down
-      - wait up to LOAD_TIMEOUT for new tweet cards to appear
-      - stop once there are MAX_STABLE passes with no new cards
+    Scroll‑and‑collect for X Top feed:
+      - scroll down by one viewport at a time
+      - wait up to LOAD_WAIT for new tweets
+      - stop after MAX_STABLE_PASSES with no count increase
     """
-    # wait for first tweet
+    # wait for the first tweet element
     WebDriverWait(driver, 30).until(EC.presence_of_element_located((By.XPATH, TWEET_XPATH)))
 
-    collected = []       # deduped list of tweets
-    stable_passes = 0    # how many times in a row count didn't grow
-
-    def fetch_all():
-        """Grab all currently on‑page tweets as dicts."""
+    def fetch():
+        """Return list of (text, user, date) tuples for all tweets on page."""
         out = []
-        for card in driver.find_elements(By.XPATH, TWEET_XPATH):
+        for c in driver.find_elements(By.XPATH, TWEET_XPATH):
             try:
-                text = card.find_element(By.XPATH, ".//div[@data-testid='tweetText']").text.strip()
-                user = card.find_element(By.XPATH, ".//div[@dir='ltr']/span").text.strip()
-                date = card.find_element(By.TAG_NAME, "time").get_attribute("datetime")
-                out.append((text, user, date))
+                txt = c.find_element(By.XPATH, ".//div[@data-testid='tweetText']").text.strip()
+                usr = c.find_element(By.XPATH, ".//div[@dir='ltr']/span").text.strip()
+                dt  = c.find_element(By.TAG_NAME, "time").get_attribute("datetime")
+                out.append((txt, usr, dt))
             except WebDriverException:
                 continue
         return out
 
-    # initial fetch
-    current = fetch_all()
-    for t in current:
+    collected = []
+    # initial collection
+    for t in fetch():
         collected.append(t)
 
-    # loop until no growth
-    while stable_passes < MAX_STABLE:
+    stable = 0
+    # continue until we see MAX_STABLE_PASSES in a row with no growth
+    while stable < MAX_STABLE_PASSES:
         prev_count = len(collected)
-        # scroll
-        driver.execute_script(SCROLL_JS)
-        # wait for new cards or timeout
-        end = time.time() + LOAD_TIMEOUT
-        while time.time() < end:
-            latest = fetch_all()
-            if len(latest) > prev_count:
+        # scroll one viewport
+        driver.execute_script(VIEWPORT_SCROLL)
+        # wait for new tweets or timeout
+        deadline = time.time() + LOAD_WAIT
+        while time.time() < deadline:
+            new_list = fetch()
+            if len(new_list) > prev_count:
                 break
             time.sleep(0.5)
-        # merge new ones
-        for t in latest:
+
+        # merge any new ones
+        for t in new_list:
             if t not in collected:
                 collected.append(t)
+
         # check stability
         if len(collected) == prev_count:
-            stable_passes += 1
-            logger.debug("No new tweets (pass %d/%d)", stable_passes, MAX_STABLE)
+            stable += 1
+            logger.debug("No new tweets (pass %d/%d)", stable, MAX_STABLE_PASSES)
         else:
-            stable_passes = 0
+            stable = 0
             logger.debug("Found %d tweets so far", len(collected))
 
-    # convert tuples back to dicts
+    # convert to dicts
     return [{"content": t[0], "username": t[1], "date": t[2]} for t in collected]
 
 
 def scrape_x(keyword: str, headless: bool=False):
     """
     Scrape *all* Top‑tab tweets for `keyword` on X.com.
-    Returns list of {'content','username','date'} dicts.
+    Returns list of dicts: {'content','username','date'}.
     """
     logger.info("Scraping X.com for '%s' (Top)", keyword)
     driver = _init_driver(headless)
