@@ -145,35 +145,36 @@ def _scrape_tab(driver):
     return [{"content": t[0], "username": t[1], "date": t[2]} for t in collected]
 
 
-def scrape_x(keyword: str, headless: bool=False):
+def scrape_x(keywords: str, headless: bool=False):
     """
+    Accept either a single keyword or list of keywords.
     Scrape all tweets from both the Top (f=top) and Latest (f=live) tabs for `keyword`.
-    De‑duplicates across both tabs.
+    De‑duplicates across both tabs (globally).
     Returns list of dicts: {'content','username','date'}.
     """
-    logger.info("Scraping X.com for '%s' (Top + Live)", keyword)
+    logger.info("Scraping X.com for '%s' (Top + Live)", keywords)
+    if isinstance(keywords,str): keywords=[keywords]
     driver = _init_driver(headless)
+    all_tweets = []
+    seen = set()
     try:
         # restore login session
         _load_cookies("X_COOKIES_PATH", driver, X_DOMAIN)
-
-        all_tweets = []
-        seen = set()
-
+        for kw in keywords:
         # iterate over both tabs
-        for tab in ("top", "live"):
-            url = SEARCH_FMT.format(q=quote_plus(keyword), tab=tab)
-            if not _safe_get(driver, url):
-                continue
-            tweets = _scrape_tab(driver)
-            # dedupe across both tabs
-            for t in tweets:
-                key = (t['username'], t['date'], t['content'])
-                if key not in seen:
-                    seen.add(key)
-                    all_tweets.append(t)
+            for tab in ("top", "live"):
+                url = SEARCH_FMT.format(q=quote_plus(kw), tab=tab)
+                if not _safe_get(driver, url):
+                    continue
+                tweets = _scrape_tab(driver)
+                # dedupe across both tabs
+                for t in tweets:
+                    key = (t['username'], t['date'], t['content'])
+                    if key not in seen:
+                        seen.add(key)
+                        all_tweets.append(t)
 
-        logger.info("Collected %d unique tweets total", len(all_tweets))
+        logger.info("Collected %d unique posts total", len(all_tweets))
         return all_tweets
 
     except Exception as e:
@@ -181,3 +182,10 @@ def scrape_x(keyword: str, headless: bool=False):
         return []
     finally:
         driver.quit()
+
+def scrape_facebook(_keywords: str, _headless: bool=False):
+    """
+    (Temporary stub) Facebook scraping is disabled for now.
+    Returns an empty list so the rest of the pipeline still works.
+    """
+    return []

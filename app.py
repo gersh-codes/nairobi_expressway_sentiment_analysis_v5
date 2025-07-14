@@ -11,6 +11,7 @@ import pandas as pd
 from utils.scraper import scrape_x, scrape_facebook
 from utils.sentiment import analyze_sentiment
 from utils.cleaning import clean_text, tokenize_and_lemmatize, geocode_location
+from utils.topic_modeling import run_topic_modeling
 
 # ─── Bootstrap & UTF‑8 ────────────────────────────────────
 from dotenv import load_dotenv
@@ -40,6 +41,7 @@ mongo_uri = os.getenv('MONGODB_URI', 'mongodb://localhost:27017')
 client = MongoClient(mongo_uri, serverSelectionTimeoutMS=5000)
 db = client['sentiment_db']
 logs = db['logs']
+topics_col=db['topics']
 logger.info('Connected to MongoDB at %s', mongo_uri)
 
 # ─── Project Phase Helpers ─────────────────────────────────
@@ -74,40 +76,59 @@ def _save(doc: dict):
     except errors.PyMongoError:
         logger.exception('DB insert failed')
 
-# ─── Scrape, Clean, Analyze & Store ───────────────────────
-def _scrape_store(keyword: str):
-    """Full pipeline: scrape → clean → analyze → store."""
+# ─── Scrape, Clean, Analyze & Store X.com ───────────────────────
+def _scrape_store(keywords: str):
+    """Full pipeline: scrape → clean → topics → sentiment → store (with dominant topic)."""
     now = datetime.datetime.now(datetime.timezone.utc).isoformat()
-    logger.info('[JOB] scrape %s @ %s', keyword, now)
+    logger.info('[JOB] scrape %s @ %s', keywords, now)
 
-    # — X.com —
-    tweets = scrape_x(keyword, headless=not DEBUG)
-    seen = set()
-    for t in tweets:
-        key = (t['username'], t['date'], t['content'][:30])
-        if key in seen:
-            continue
+    # 1) Scrape raw posts
+    x_raw=scrape_x(keywords, headless=not DEBUG)
+    
+    # 2) Clean & tokenize, collect for topic model
+    cleaned_texts=[]
+    for rec in x_raw:
+        txt=clean_text(rec['content'])
+        cleaned_texts.append(txt)
+        rec['clean']=txt
+    # (similarly for fb_raw if you like)
+
+    # 3) Run LDA on the cleaned corpus
+    vec,lda,defs = run_topic_modeling(cleaned_texts, num_topics=5, num_words=7)
+    # Persist the topic definitions for this run
+    topics_col.replace_one({'keywords':keywords,'time':now},{
+        'keywords':keywords,'time':now,'topics':defs
+    }, upsert=True)
+
+    # 4) Assign dominant topic & save X.com items
+    X = vec.transform(cleaned_texts)
+    dists = lda.transform(X)
+    seen=set()
+    for i,rec in enumerate(x_raw):
+        dom = int(dists[i].argmax())
+        key=(rec['username'],rec['date'],rec['clean'][:30])
+        if key in seen: continue
         seen.add(key)
 
-        text = clean_text(t['content'])
-        sent = analyze_sentiment(text)
-        sent['tokens'] = tokenize_and_lemmatize(text)
-        sent['geo'] = geocode_location(t.get('username'))
-
+        sent=analyze_sentiment(rec['clean'])
         sent.update({
-            'platform': 'x',
-            'text': text,
-            'meta': {'username': t['username'], 'date': t['date']},
-            'timestamp': now,
-            'project_phase': _project_phase(t['date']),
-            'keyword': keyword,
+            'tokens':tokenize_and_lemmatize(rec['clean']),
+            'geo':geocode_location(rec['username']),
+            'platform':'x',
+            'text':rec['clean'],
+            'meta':{'username':rec['username'],'date':rec['date']},
+            'timestamp':now,
+            'project_phase':_project_phase(rec['date']),
+            'keyword':keywords,
+            'topic':dom,
+            'topic_keywords':defs[dom]['keywords']
         })
         _save(sent)
-
-    logger.info('[JOB] saved %d X items', len(seen))
+    logger.info("Saved %d X posts",len(seen))
 
     # — Facebook —
-    posts = scrape_facebook(keyword, headless=not DEBUG)
+    fb_raw=scrape_facebook(keywords, headless=not DEBUG)
+    posts = scrape_facebook(keywords, headless=not DEBUG)
     seen = set()
     for p in posts:
         key = (p['post_time'], p['post_text'][:30])
@@ -126,7 +147,7 @@ def _scrape_store(keyword: str):
             'meta': {'post_time': p['post_time']},
             'timestamp': now,
             'project_phase': _project_phase(p['post_time']),
-            'keyword': keyword,
+            'keyword': keywords,
         })
         _save(sent)
 
@@ -158,6 +179,11 @@ def export_data(fmt):
         df.to_json(fname, orient='records', force_ascii=False)
     return send_file(fname, as_attachment=True)
 
+@app.route('/topics')
+def list_topics():
+    kws=request.args.getlist('keyword')
+    rec=topics_col.find_one({'keywords':kws},{'_id':0})
+    return jsonify(rec or {})
 # ─── Scheduler ────────────────────────────────────────────
 def _scheduled():
     kws = logs.distinct('keyword')
