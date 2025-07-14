@@ -136,10 +136,10 @@ def _scrape_tab(driver):
         # track stability
         if len(collected) == prev_count:
             stable += 1
-            logger.debug("No new tweets (pass %d/%d)", stable, MAX_STABLE)
+            logger.debug("No new posts (pass %d/%d)", stable, MAX_STABLE)
         else:
             stable = 0
-            logger.debug("Found %d tweets so far", len(collected))
+            logger.debug("Found %d posts so far", len(collected))
 
     # convert to dicts
     return [{"content": t[0], "username": t[1], "date": t[2]} for t in collected]
