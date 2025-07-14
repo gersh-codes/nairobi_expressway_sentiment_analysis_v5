@@ -174,7 +174,7 @@ def scrape_x(keywords: str, headless: bool=False):
                         seen.add(key)
                         all_tweets.append(t)
 
-        logger.info("Collected %d unique posts total", len(all_tweets))
+        logger.info("Collected %d unique posts in total", len(all_tweets))
         return all_tweets
 
     except Exception as e:
