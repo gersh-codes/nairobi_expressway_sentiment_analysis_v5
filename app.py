@@ -127,7 +127,6 @@ def _scrape_store(keywords: str):
     logger.info("Saved %d X posts",len(seen))
 
     # — Facebook —
-    fb_raw=scrape_facebook(keywords, headless=not DEBUG)
     posts = scrape_facebook(keywords, headless=not DEBUG)
     seen = set()
     for p in posts:
