@@ -92,42 +92,71 @@ def _scrape_store(keywords: str):
         cleaned_texts.append(txt)
         rec['clean']=txt
     # (similarly for fb_raw if you like)
-
-    # 3) Run LDA on the cleaned corpus
-    vec,lda,defs = run_topic_modeling(cleaned_texts, num_topics=5, num_words=7)
+    if not cleaned_texts or all(not txt.strip() for txt in cleaned_texts):
+        # nothing to model
+        defs = []
+        vec = lda = None
+    else:
+        try:
+            # 3) Run LDA on the cleaned corpus
+            vec,lda,defs = run_topic_modeling(cleaned_texts, num_topics=5, num_words=7)
+        except ValueError as e:
+            # catch empty‑vocabulary errors
+            logger.warning("Topic modeling skipped: %s", e)
+            defs = []
+            vec = lda = None
     # Persist the topic definitions for this run
     topics_col.replace_one({'keywords':keywords,'time':now},{
         'keywords':keywords,'time':now,'topics':defs
     }, upsert=True)
 
-    # 4) Assign dominant topic & save X.com items
-    X = vec.transform(cleaned_texts)
-    dists = lda.transform(X)
-    seen=set()
-    for i,rec in enumerate(x_raw):
-        dom = int(dists[i].argmax())
-        key=(rec['username'],rec['date'],rec['clean'][:30])
-        if key in seen: continue
+        # 4) Assign dominant topic & save X.com items
+    #    if lda is None, we’ll force a single “no-topic” bucket
+    if lda is not None:
+        # compute document–topic distributions
+        X = vec.transform(cleaned_texts)
+        dists = lda.transform(X)
+    else:
+        # one dummy distribution per document
+        dists = [[1.0]] * len(cleaned_texts)  # always pick topic 0 below
+
+    seen = set()
+    for i, rec in enumerate(x_raw):
+        # pick the highest-probability topic
+        dom = int(dists[i].argmax()) if lda is not None else None
+
+        # dedupe by user/date/snippet
+        key = (rec['username'], rec['date'], rec['clean'][:30])
+        if key in seen:
+            continue
         seen.add(key)
 
-        sent=analyze_sentiment(rec['clean'])
-        sent.update({
-            'tokens':tokenize_and_lemmatize(rec['clean']),
-            'geo':geocode_location(rec['username']),
-            'platform':'x',
-            'text':rec['clean'],
-            'meta':{'username':rec['username'],'date':rec['date']},
-            'timestamp':now,
-            'project_phase':_project_phase(rec['date']),
-            'keyword':keywords,
-            'topic':dom,
-            'topic_keywords':defs[dom]['keywords']
-        })
+        # run sentiment
+        sent = analyze_sentiment(rec['clean'])
+
+        # build the document record
+        record = {
+            'tokens':           tokenize_and_lemmatize(rec['clean']),
+            'geo':              geocode_location(rec['username']),
+            'platform':         'x',
+            'text':             rec['clean'],
+            'meta':             {'username': rec['username'], 'date': rec['date']},
+            'timestamp':        now,
+            'project_phase':    _project_phase(rec['date']),
+            'keyword':          keywords,
+            'topic':            dom,
+            'topic_keywords':   defs[dom]['keywords'] if (lda is not None and defs) else []
+        }
+
+        # merge in sentiment scores and persist
+        sent.update(record)
         _save(sent)
-    logger.info("Saved %d X posts",len(seen))
+
+    logger.info("Saved %d X posts", len(seen))
+
 
     # — Facebook —
-    posts = scrape_facebook(keywords, headless=not DEBUG)
+    posts = scrape_facebook(keywords)
     seen = set()
     for p in posts:
         key = (p['post_time'], p['post_text'][:30])
