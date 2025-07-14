@@ -114,8 +114,8 @@ def _scrape_store(keywords: str):
     #    if lda is None, we’ll force a single “no-topic” bucket
     if lda is not None:
         # compute document–topic distributions
-        X = vec.transform(cleaned_texts)
-        dists = lda.transform(X)
+        x_matrix = vec.transform(cleaned_texts)
+        dists = lda.transform(x_matrix)
     else:
         # one dummy distribution per document
         dists = [[1.0]] * len(cleaned_texts)  # always pick topic 0 below
