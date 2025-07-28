@@ -7,7 +7,7 @@ from nltk.stem import WordNetLemmatizer
 from geopy.geocoders import Nominatim
 
 # ─── NLTK Setup ───────────────────────────────────────────────────────────
-nltk.download('punkt'); nltk.download('stopwords'); nltk.download('wordnet')
+nltk.download('punkt'); nltk.download('stopwords'); nltk.download('wordnet'); nltk.download('punkt_tab')
 STOP = set(stopwords.words('english'))
 LEMM = WordNetLemmatizer()
 GEO  = Nominatim(user_agent="sentiment_app", timeout=10)
