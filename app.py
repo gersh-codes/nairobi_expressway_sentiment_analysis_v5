@@ -24,6 +24,11 @@ from utils.cleaning import clean_text, tokenize_and_lemmatize, geocode_location
 # ─── Bootstrap & UTF-8 ────────────────────────────────────
 from dotenv import load_dotenv
 load_dotenv()
+import certifi
+
+# Force both requests and urllib3 to use the correct Windows CA bundle
+os.environ['SSL_CERT_FILE'] = certifi.where()
+os.environ['REQUESTS_CA_BUNDLE'] = certifi.where()
 sys.stdout.reconfigure(encoding='utf-8')
 
 # ─── Logger Setup ─────────────────────────────────────────
