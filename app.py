@@ -11,6 +11,8 @@ from apscheduler.jobstores.memory import MemoryJobStore
 import pandas as pd
 
 # topic-modeling helpers
+import matplotlib
+matplotlib.use('Agg')   # non-interactive backend
 import matplotlib.pyplot as plt  # type: ignore: ensure matplotlib is installed
 from utils.topic_modeling import (
     run_topic_modeling_by_phase,

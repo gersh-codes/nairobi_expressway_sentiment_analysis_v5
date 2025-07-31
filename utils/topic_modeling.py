@@ -1,3 +1,6 @@
+import matplotlib
+matplotlib.use('Agg') # switch to non-interactive backend
+
 from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.decomposition import LatentDirichletAllocation
 import matplotlib.pyplot as plt
@@ -94,7 +97,6 @@ def plot_topic_barchart(topic_id, top_keywords):
     plt.title(f'Topic {topic_id} Top Words')
     plt.gca().invert_yaxis()  # largest on top
     plt.tight_layout()
-    plt.show()
 
 
 def plot_topic_wordcloud(topic_id, full_distribution):
@@ -108,4 +110,3 @@ def plot_topic_wordcloud(topic_id, full_distribution):
     plt.axis('off')
     plt.title(f'Topic {topic_id} Word Cloud')
     plt.tight_layout()
-    plt.show()
